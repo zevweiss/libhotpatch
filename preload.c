@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <assert.h>
 #include <dlfcn.h>
@@ -10,6 +11,7 @@
 #include <limits.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 
 #include <udis86.h>
 
@@ -108,7 +110,7 @@ static inline int inst_opnd_rip_rel(ud_t* ud)
 }
 
 /* determine if the most recently disassembled instruction is relocatable */
-static int inst_relocatable(ud_t* ud)
+static int udinst_relocatable(ud_t* ud)
 {
 	switch (ud->mnemonic) {
 
@@ -130,7 +132,8 @@ static int inst_relocatable(ud_t* ud)
 	case UD_Ipop:
 	case UD_Ipush:
 		if (inst_opnd_rip_rel(ud)) {
-			fprintf(pllog,"warning: must relocate %s\n",ud_insn_asm(ud));
+			fprintf(pllog,"warning: must relocate %s [%s]\n",
+			        ud_insn_asm(ud),ud_insn_hex(ud));
 			return 0;
 		} else
 			return 1;
@@ -167,9 +170,26 @@ static int inst_relocatable(ud_t* ud)
 }
 
 struct inst {
-	char* bytes;
+	void* pc;
+	uint8_t* bytes;
 	uint8_t len;
 };
+
+static void inst_to_ud(const struct inst* inst, ud_t* ud)
+{
+	ud_init(ud);
+	ud_set_input_buffer(ud,inst->bytes,inst->len);
+	ud_set_mode(ud,64);
+	ud_set_syntax(ud,UD_SYN_ATT);
+	ud_disassemble(ud);
+}
+
+static int inst_relocatable(const struct inst* inst)
+{
+	ud_t ud;
+	inst_to_ud(inst,&ud);
+	return udinst_relocatable(&ud);
+}
 
 static void dup_ud_inst(ud_t* ud, struct inst* inst)
 {
@@ -177,11 +197,178 @@ static void dup_ud_inst(ud_t* ud, struct inst* inst)
 	inst->bytes = malloc(inst->len);
 	assert(inst->bytes);
 	memcpy(inst->bytes,ud_insn_ptr(ud),inst->len);
+	inst->pc = (void*)((uintptr_t)ud->pc - (uintptr_t)inst->len);
 }
 
-static unsigned int patch_sys_entries(void* buf, size_t len)
+/*
+ * An mmap area used for hotpatch trampolines.
+ */
+struct trampmap {
+	/* trampoline map base address */
+	void* base;
+
+	/* size of the trampoline map and how much of it we've
+	 * currently used */
+	size_t size,used;
+
+	/* which original (program text) map the trampolines in this
+	 * region bounce to/from */
+	unsigned int mapnum;
+};
+
+/* Initial size we'll aim at for trampoline maps */
+#define TRAMPMAP_MIN_SIZE (64*1024)
+#define MIN_TRAMP_SIZE 64
+
+static struct trampmap* trampmaps = NULL;
+static unsigned int ntrampmaps = 0;
+
+/*
+ * Used as a filler byte in trampoline areas so we'll trap in case
+ * anything goes unexpectedly out of bounds.
+ */
+#define X86OP_INT3 0xcc
+#define X86OP_JMP_REL32 0xe9
+
+#define JMP_REL32_NBYTES 5
+#define JCC_REL32_NBYTES 6
+#define JCC_REL8_NBYTES 2
+	
+
+/*
+ * "Translate" an instruction for relocation from orig->pc to new->pc
+ * (which must be filled in by the caller, new's other fields will be
+ * filled in by translate_inst()).
+ */
+static void translate_inst(const struct inst* orig, struct inst* new)
+{
+	ud_t oud;
+	int64_t origofst,newofst;
+	uintptr_t jcctarg;
+	uint16_t jccop;
+
+	inst_to_ud(orig,&oud);
+	if (udinst_relocatable(&oud)) {
+		*new = *orig;
+		return;
+	}
+	switch (oud.mnemonic) {
+	case UD_Ijz:
+	case UD_Ijnz:
+	case UD_Ijo:
+	case UD_Ijp:
+	case UD_Ijs:
+	case UD_Ija:
+	case UD_Ijae:
+	case UD_Ijb:
+	case UD_Ijbe:
+	case UD_Ijg:
+	case UD_Ijge:
+	case UD_Ijl:
+	case UD_Ijle:
+	case UD_Ijno:
+	case UD_Ijnp:
+	case UD_Ijns:
+		assert(oud.operand[0].type == UD_OP_JIMM);
+		switch (oud.operand[0].size) {
+		case 8:
+			origofst = oud.operand[0].lval.sbyte;
+			if ((orig->bytes[0] & 0xf0) == 0xe0) {
+				assert(orig->bytes[0] == 0xe3);
+				fprintf(pllog,"stupid-ass x86 jcx NYI\n");
+				abort();
+			}
+			assert((orig->bytes[0] & 0xf0) == 0x70);
+			jccop = 0x0f80 | (orig->bytes[0] & 0x0f);
+			break;
+		case 32:
+			origofst = oud.operand[0].lval.sdword;
+			jccop = (orig->bytes[0] << 8) | orig->bytes[1];
+			break;
+		default:
+			fprintf(pllog,"unknown jcc operand size (%i)\n",
+			        oud.operand[0].size);
+		}
+
+		jcctarg = (uintptr_t)orig->pc + orig->len + origofst;
+		newofst = (int64_t)jcctarg - ((int64_t)new->pc + JCC_REL32_NBYTES);
+		if (newofst > INT32_MAX || newofst < INT32_MIN) {
+			fprintf(pllog,"jcc-rel32 can't reach target\n");
+			abort();
+		}
+
+		new->len = JCC_REL32_NBYTES;
+		new->bytes = malloc(JCC_REL32_NBYTES);
+		assert(new->bytes);
+		new->bytes[0] = (uint8_t)(jccop >> 8);
+		new->bytes[1] = (uint8_t)(jccop & 0xff);
+		*(int32_t*)(&new->bytes[2]) = newofst;
+
+		return;
+	default:
+		fprintf(pllog,"warning: not translating %s\n",ud_insn_asm(&oud));
+		*new = *orig;
+	}
+}
+
+/*
+ * Trampoline functions will start on 8-byte aligned addresses.
+ */
+static void gentramp(const struct inst* orig, const struct inst* succs,
+                     int nsuccs, struct trampmap* tm, void* retaddr)
+{
+	uint8_t* iptr;
+	int i;
+	struct inst trans;
+	int64_t retofst;
+
+	iptr = tm->base + tm->used;
+
+	assert((uintptr_t)iptr % 8 == 0);
+
+	/* for starters we'll just do a no-op trampoline */
+	if (tm->used + orig->len > tm->size) {
+		fprintf(pllog,"trampoline area overflow\n");
+		abort();
+	}
+	iptr = mempcpy(iptr,orig->bytes,orig->len);
+	tm->used += orig->len;
+
+	for (i = 0; i < nsuccs; i++) {
+		trans.pc = iptr;
+		translate_inst(&succs[i],&trans);
+		if (tm->used + trans.len > tm->size) {
+			fprintf(pllog,"trampoline area overflow\n");
+			abort();
+		}
+		iptr = mempcpy(iptr,trans.bytes,trans.len);
+		tm->used += trans.len;
+	}
+
+	retofst = (int64_t)retaddr - ((int64_t)iptr + JMP_REL32_NBYTES);
+	if (retofst > INT32_MAX || retofst < INT32_MIN) {
+		fprintf(pllog,"return branch beyond rel32 range\n");
+		abort();
+	}
+
+	/* and generate the return jmp */
+	*iptr++ = X86OP_JMP_REL32;
+	tm->used++;
+	*(int32_t*)iptr = (int32_t)retofst;
+	iptr += sizeof(int32_t);
+	tm->used += sizeof(int32_t);
+
+	while ((uintptr_t)iptr % 8) {
+		*iptr++ = X86OP_INT3;
+		tm->used++;
+	}
+	return;
+}
+
+static unsigned int patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
 {
 	ud_t ud;
+	struct inst orig;
 	struct inst succs[3];	/* successor instructions */
 	unsigned int found = 0;
 	unsigned int i,succbytes;
@@ -203,16 +390,13 @@ static unsigned int patch_sys_entries(void* buf, size_t len)
 		case UD_Isysenter:
 			++found;
 			assert(ud_insn_len(&ud) == 2);
+			dup_ud_inst(&ud,&orig);
 			for (i = 0, succbytes = 0; i < 3 && succbytes < 3; i++) {
 				ud_disassemble(&ud);
-				if (!inst_relocatable(&ud)) {
-/* 					fprintf(pllog,"uh-oh, non-relocatable inst: %s\n", */
-/* 					        ud_insn_asm(&ud)); */
-/* 					abort(); */
-				}
 				dup_ud_inst(&ud,&succs[i]);
 				succbytes += succs[i].len;
 			}
+			gentramp(&orig,succs,i,tm,(void*)ud.pc);
 			break;
 		default:
 			break;
@@ -224,15 +408,39 @@ static unsigned int patch_sys_entries(void* buf, size_t len)
 struct map {
 	void* start;
 	void* end;
-	char perms[4];
+	int prot;
 	off_t ofst;
 	uint8_t majdev,mindev;
-	int inode;
+	ino_t inode;
 	char* path;
+	int tmnum;
 };
 
-struct map* maps = NULL;
-unsigned int nmaps = 0;
+static struct map* maps = NULL;
+static unsigned int nmaps = 0;
+
+static int perms_to_prot(char str[4])
+{
+	int flags = PROT_NONE;
+	flags |= str[0] == 'r' ? PROT_READ : 0;
+	flags |= str[1] == 'w' ? PROT_WRITE : 0;
+	flags |= str[2] == 'x' ? PROT_EXEC : 0;
+	return flags;
+}
+
+/* comparison function for two maps' address spaces */
+static int mapcmp(const void* a, const void* b)
+{
+	const struct map* ma = a;
+	const struct map* mb = b;
+	if (ma->start < mb->start)
+		return -1;
+	if (ma->start == mb->start)
+		return 0;
+	if (ma->start > mb->start)
+		return 1;
+	abort();
+}
 
 /* snapshot the proc's memory maps before we start messing with things */
 void read_maps(void)
@@ -262,34 +470,145 @@ void read_maps(void)
 		else
 			fscanf(procmaps," %s\n",path);
 
-		maps = realloc(maps,sizeof(struct map)*++nmaps);
+		maps = realloc(maps,sizeof(*maps)*++nmaps);
+		assert(maps);
 		maps[nmaps-1].start = start;
 		maps[nmaps-1].end = end;
-		memcpy(maps[nmaps-1].perms,perms,sizeof(perms));
+		maps[nmaps-1].prot = perms_to_prot(perms);
 		maps[nmaps-1].ofst = ofst;
 		maps[nmaps-1].majdev = majdev;
 		maps[nmaps-1].mindev = mindev;
 		maps[nmaps-1].inode = inode;
 		maps[nmaps-1].path = strdup(path);
+		maps[nmaps-1].tmnum = -1;
 	}
 	fclose(procmaps);
+
+	/* it appears the kernel does this anyway, but later
+	 * assumptions (in get_trampmap) depend on our maps being in
+	 * order of increasing addresses, so make sure they really
+	 * are. */
+	qsort(maps,nmaps,sizeof(*maps),mapcmp);
+}
+
+static int new_trampmap(void* base, int origmap)
+{
+	void* tmbase;
+	assert((uintptr_t)base % getpagesize() == 0);
+
+	tmbase = mmap(base,TRAMPMAP_MIN_SIZE,
+	              PROT_READ|PROT_WRITE|PROT_EXEC,
+	              MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0);
+	if (tmbase == MAP_FAILED) {
+		fprintf(pllog,"trampoline area mmap failed for map %i (%s) at %p: %s\n",
+		        origmap,maps[origmap].path,base,strerror(errno));
+		base = (void*)((uintptr_t)base - (uintptr_t)(1ULL<<32));
+		tmbase = mmap(base,TRAMPMAP_MIN_SIZE,
+		              PROT_READ|PROT_WRITE|PROT_EXEC,
+		              MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0);
+		if (tmbase == MAP_FAILED) {
+			fprintf(pllog,"and failed again at %p\n",base);
+			return -1;
+		} else
+			fprintf(pllog,"but worked on retry at %p\n",base);
+	}
+	assert(tmbase == base);
+	trampmaps = realloc(trampmaps,
+	                    sizeof(*trampmaps)*++ntrampmaps);
+	assert(trampmaps);
+	trampmaps[ntrampmaps-1].base = tmbase;
+	trampmaps[ntrampmaps-1].size = TRAMPMAP_MIN_SIZE;
+	trampmaps[ntrampmaps-1].used = 0;
+	trampmaps[ntrampmaps-1].mapnum = origmap;
+
+	return ntrampmaps - 1;
+}
+
+/* find space for and create the trampoline area used for patching
+ * maps[origmap], adding and entry to trampmaps and returning its
+ * index. */
+static int get_trampmap(unsigned int origmap)
+{
+	int mi;
+	struct map* m;
+	void* lbound;
+
+	assert(maps[origmap].tmnum == -1);
+
+	/* because of the order in which we're doing things, the first
+	 * possible place we could put it is just past the last
+	 * trampmap */
+	if (ntrampmaps)
+		lbound = trampmaps[ntrampmaps-1].base + trampmaps[ntrampmaps-1].size;
+	else
+		lbound = 0;
+
+	for (mi = origmap+1, m = maps+origmap+1; mi < nmaps; m++, mi++) {
+		if (lbound < (m-1)->end)
+			lbound = (m-1)->end;
+
+		if (m->start - lbound >= TRAMPMAP_MIN_SIZE)
+			return new_trampmap(lbound,origmap);
+	}
+
+	if (mi == nmaps) {
+		mi = nmaps - 1;
+		m = &maps[mi];
+		if (lbound < m->end)
+			lbound = m->end;
+		if (UINTPTR_MAX - (uintptr_t)lbound >= TRAMPMAP_MIN_SIZE - 1)
+			return new_trampmap(lbound,origmap);
+	}
+
+	fprintf(pllog,"failed to find trampoline area for map %i (%s)\n",
+	        origmap,maps[origmap].path);
+	abort();
+}
+
+static void print_maps(void)
+{
+	int i,p;
+
+	fprintf(pllog,"initial maps:\n");
+
+	for (i = 0; i < nmaps; i++) {
+		p = maps[i].prot;
+		fprintf(pllog,"%p-%p %c%c%c %s\n",maps[i].start,maps[i].end,
+		        p & PROT_READ ? 'r' : '-', p & PROT_WRITE ? 'w' : '-',
+		        p & PROT_EXEC ? 'x' : '-', maps[i].path);
+	}
 }
 
 static void find_text(void)
 {
 	char* basename;
-	int i;
+	int i,nfound = 0,tmnum;
 	struct map* m;
 
 	read_maps();
 
 	for (m = maps, i = 0; i < nmaps; m++, i++) {
-		if (m->perms[2] == 'x') {
+		if (m->prot & PROT_EXEC) {
 			if ((basename = strrchr(m->path,'/'))
 			    && !strcmp(basename+1,"lib752.so"))
 				continue;
-			fprintf(pllog,"found executable map from '%s'\n",m->path);
-			patch_sys_entries(m->start,m->end - m->start);
+//			fprintf(pllog,"found executable map from '%s'\n",m->path);
+			tmnum = get_trampmap(i);
+			if (tmnum == -1) {
+				fprintf(pllog,"mmap failed for %s trampoline area",
+				        maps[i].path);
+				if (!strcmp(maps[i].path,"[vdso]")
+				    || !strcmp(maps[i].path,"[vsyscall]"))
+					fprintf(pllog,", ignoring...\n");
+				else {
+					fprintf(pllog,", aborting!\n");
+					abort();
+				}
+			} else {
+				nfound = patch_sys_entries(m->start,m->end - m->start,
+				                           &trampmaps[tmnum]);
+//				fprintf(pllog,"  %i sysentry points found\n",nfound);
+			}
 		}
 	}
 }
@@ -409,8 +728,7 @@ static void usr_handler(int signo)
 
 static void lib752_fini(void)
 {
-	// need to ensure *one* of main code or signal handler can access FILE*s at any given point
-	signal(SIGUSR1,SIG_IGN);
+	signal(SIGUSR1,SIG_DFL);
 
 	showstats(1);
 	fclose(pllog);
