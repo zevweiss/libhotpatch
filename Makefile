@@ -9,7 +9,7 @@ default: lib752.so
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-lib752.so: preload.o
+lib752.so: lib752.o
 	$(CC) $(CFLAGS) -shared -Wl,-soname,$@ -o $@ $^ -ldl -Wl,-Bstatic -ludis86 -Wl,-Bdynamic
 
 .PHONY: clean
