@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <limits.h>
 #include <string.h>
+#include <stdint.h>
 
 #include <udis86.h>
 
@@ -94,26 +95,124 @@ static void rusage_hdr(void)
 	        "VCSW","ICSW");
 }
 
+/* check if any of instruction's operands are RIP-relative memory operands */
+static inline int inst_opnd_rip_rel(ud_t* ud)
+{
+	int i;
+	for (i = 0; i < 3; i++) {
+		if (ud->operand[i].type == UD_OP_MEM
+		    && ud->operand[i].base == UD_R_RIP)
+			return 1;
+	}
+	return 0;
+}
+
+/* determine if the most recently disassembled instruction is relocatable */
+static int inst_relocatable(ud_t* ud)
+{
+	switch (ud->mnemonic) {
+
+	case UD_Iret:
+	case UD_Ileave:
+	case UD_Inop:
+	case UD_Icdqe:
+		return 1;
+
+	case UD_Itest:
+	case UD_Icmp:
+	case UD_Ilea:
+	case UD_Imov:
+	case UD_Iand:
+	case UD_Iadd:
+	case UD_Ixor:
+	case UD_Ixchg:
+	case UD_Ineg:
+	case UD_Ipop:
+	case UD_Ipush:
+		if (inst_opnd_rip_rel(ud)) {
+			fprintf(pllog,"warning: must relocate %s\n",ud_insn_asm(ud));
+			return 0;
+		} else
+			return 1;
+
+	case UD_Ijmp:
+		if (ud->operand[0].type == UD_OP_JIMM)
+			return 0;
+		else
+			abort();
+
+	case UD_Ijz:
+	case UD_Ijnz:
+	case UD_Ijo:
+	case UD_Ijp:
+	case UD_Ijs:
+	case UD_Ija:
+	case UD_Ijae:
+	case UD_Ijb:
+	case UD_Ijbe:
+	case UD_Ijg:
+	case UD_Ijge:
+	case UD_Ijl:
+	case UD_Ijle:
+	case UD_Ijno:
+	case UD_Ijnp:
+	case UD_Ijns:
+		return 0;
+
+	default:
+		fprintf(pllog,"NYI: relocatability of %s (%i bytes @ pc=%lx)\n",
+		        ud_insn_asm(ud),ud_insn_len(ud),ud->pc-ud_insn_len(ud));
+		abort();
+	}
+}
+
+struct inst {
+	char* bytes;
+	uint8_t len;
+};
+
+static void dup_ud_inst(ud_t* ud, struct inst* inst)
+{
+	inst->len = ud_insn_len(ud);
+	inst->bytes = malloc(inst->len);
+	assert(inst->bytes);
+	memcpy(inst->bytes,ud_insn_ptr(ud),inst->len);
+}
+
 static unsigned int patch_sys_entries(void* buf, size_t len)
 {
 	ud_t ud;
-	unsigned int bytes;
+	struct inst succs[3];	/* successor instructions */
 	unsigned int found = 0;
+	unsigned int i,succbytes;
 
 	ud_init(&ud);
 	ud_set_input_buffer(&ud,buf,len);
+	ud_set_syntax(&ud,UD_SYN_ATT);
 	ud_set_mode(&ud,64);
+	ud_set_pc(&ud,(uint64_t)buf);
 
-	while ((bytes = ud_disassemble(&ud))) {
+	while (ud_disassemble(&ud)) {
 		switch (ud.mnemonic) {
+		case UD_Iint:
+			assert(ud.operand[0].type == UD_OP_IMM);
+			if (ud.operand[0].lval.ubyte != 0x80)
+				break;
+			/* otherwise fall through */
 		case UD_Isyscall:
 		case UD_Isysenter:
 			++found;
-			break;
-		case UD_Iint:
-			assert(ud.operand[0].type == UD_OP_IMM);
-			if (ud.operand[0].lval.ubyte == 0x80)
-				++found;
+			assert(ud_insn_len(&ud) == 2);
+			for (i = 0, succbytes = 0; i < 3 && succbytes < 3; i++) {
+				ud_disassemble(&ud);
+				if (!inst_relocatable(&ud)) {
+/* 					fprintf(pllog,"uh-oh, non-relocatable inst: %s\n", */
+/* 					        ud_insn_asm(&ud)); */
+/* 					abort(); */
+				}
+				dup_ud_inst(&ud,&succs[i]);
+				succbytes += succs[i].len;
+			}
 			break;
 		default:
 			break;
@@ -122,44 +221,77 @@ static unsigned int patch_sys_entries(void* buf, size_t len)
 	return found;
 }
 
-static void find_text(void)
-{
-	FILE* maps;
-	char path[PATH_MAX];
-	char perms[4];
+struct map {
 	void* start;
 	void* end;
+	char perms[4];
 	off_t ofst;
-	char majdev,mindev,space;
+	uint8_t majdev,mindev;
 	int inode;
-	int nscanned;
-	char* basename;
-	int patches;
+	char* path;
+};
 
-	maps = fopen("/proc/self/maps","r");
-	assert(maps);
+struct map* maps = NULL;
+unsigned int nmaps = 0;
+
+/* snapshot the proc's memory maps before we start messing with things */
+void read_maps(void)
+{
+	FILE* procmaps;
+	void* start;
+	void* end;
+	char perms[4];
+	off_t ofst;
+	uint8_t majdev,mindev;
+	int inode;
+	char path[PATH_MAX];
+	char space;
+	int nscanned;
+
+	procmaps = fopen("/proc/self/maps","r");
+	assert(procmaps);
 	while (1) {
-		nscanned = fscanf(maps,"%p-%p %s %lx %hhx:%hhx %i%c",
+		nscanned = fscanf(procmaps,"%p-%p %s %lx %hhx:%hhx %i%c",
 		                  &start,&end,perms,&ofst,&majdev,&mindev,&inode,&space);
-		if (feof(maps))
+		if (feof(procmaps))
 			break;
 		assert(nscanned == 8);
 		assert(space == ' ');
-		if (fgetc(maps) == '\n')
+		if (fgetc(procmaps) == '\n')
 			path[0] = '\0';
 		else
-			fscanf(maps," %s\n",path);
+			fscanf(procmaps," %s\n",path);
 
-		if (perms[2] == 'x') {
-			if ((basename = strrchr(path,'/'))
+		maps = realloc(maps,sizeof(struct map)*++nmaps);
+		maps[nmaps-1].start = start;
+		maps[nmaps-1].end = end;
+		memcpy(maps[nmaps-1].perms,perms,sizeof(perms));
+		maps[nmaps-1].ofst = ofst;
+		maps[nmaps-1].majdev = majdev;
+		maps[nmaps-1].mindev = mindev;
+		maps[nmaps-1].inode = inode;
+		maps[nmaps-1].path = strdup(path);
+	}
+	fclose(procmaps);
+}
+
+static void find_text(void)
+{
+	char* basename;
+	int i;
+	struct map* m;
+
+	read_maps();
+
+	for (m = maps, i = 0; i < nmaps; m++, i++) {
+		if (m->perms[2] == 'x') {
+			if ((basename = strrchr(m->path,'/'))
 			    && !strcmp(basename+1,"lib752.so"))
 				continue;
-			patches = patch_sys_entries(start,end-start);
-			fprintf(pllog,"found executable map from '%s' with %i system entries\n",path,patches);
+			fprintf(pllog,"found executable map from '%s'\n",m->path);
+			patch_sys_entries(m->start,m->end - m->start);
 		}
 	}
-
-	fclose(maps);
 }
 
 static void lib752_init(void)
