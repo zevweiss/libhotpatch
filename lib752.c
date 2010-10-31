@@ -138,15 +138,21 @@ static int udinst_relocatable(ud_t* ud)
 	case UD_Ilea:
 	case UD_Imov:
 	case UD_Iand:
+	case UD_Idec:
 	case UD_Iadd:
+	case UD_Isub:
 	case UD_Ixor:
+	case UD_Ior:
 	case UD_Ixchg:
+	case UD_Icmpxchg:
 	case UD_Ineg:
 	case UD_Ipop:
+	case UD_Isar:
 	case UD_Ipush:
 		return !inst_opnd_rip_rel(ud);
 
 	case UD_Ijmp:
+	case UD_Icall:
 		if (ud->operand[0].type == UD_OP_JIMM)
 			return 0;
 		else
@@ -237,6 +243,7 @@ static unsigned int ntrampmaps = 0;
  */
 #define X86OP_INT3 0xcc
 #define X86OP_JMP_REL32 0xe9
+#define X86OP_CALL_REL32 0xe8
 #define X86OP_JCC_REL32 0x0f80
 
 #define JMP_REL32_NBYTES 5
@@ -258,6 +265,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 	uintptr_t targ;
 	uint16_t jccop;
 	int ofstbyte;
+	int jmp_is_call;
 
 	inst_to_ud(orig,&oud);
 	if (udinst_relocatable(&oud)) {
@@ -320,7 +328,9 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 
 		return;
 
+	case UD_Icall:
 	case UD_Ijmp:
+		jmp_is_call = oud.mnemonic == UD_Icall;
 		if (oud.operand[0].type != UD_OP_JIMM) {
 			fprintf(pllog,"translation NYI for %s\n",ud_insn_asm(&oud));
 			abort();
@@ -347,7 +357,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 		new->len = JMP_REL32_NBYTES;
 		new->bytes = malloc(JMP_REL32_NBYTES);
 		assert(new->bytes);
-		new->bytes[0] = X86OP_JMP_REL32;
+		new->bytes[0] = jmp_is_call ? X86OP_CALL_REL32 : X86OP_JMP_REL32;
 		*(int32_t*)(&new->bytes[1]) = (int32_t)newofst;
 
 		return;
@@ -887,7 +897,7 @@ static void scan_and_patch(void)
 		nfound = patch_sys_entries(cs->start,cs->len,
 		                           &trampmaps[maps[cs->mapnum].tmnum]);
 		if (nfound)
-			fprintf(pllog,"%s[%s] (%p-%p): %i found\n",cs->filename,
+			fprintf(pllog,"%s[%s] (%p-%p): %i patched\n",cs->filename,
 			        cs->secname,cs->start,cs->start+cs->len,nfound);
 	}
 }
