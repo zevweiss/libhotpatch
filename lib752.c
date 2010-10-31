@@ -511,14 +511,98 @@ static void gentrampjmp(void* from, void* to)
 	*(int32_t*)(from+1) = (int32_t)ofst;
 }
 
-static unsigned int patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
+struct nopbuf {
+	void* start;
+	size_t len;
+	uint8_t fallthrough;
+};
+
+struct nopbuf* nopbufs = NULL;
+unsigned int nnopbufs = 0;
+unsigned int allocnopbufs = 0;
+
+struct syspatch {
+	void* start;
+	uint8_t bytes, insts;
+};
+
+struct syspatch* syspatches = NULL;
+unsigned int nsyspatches = 0;
+
+static void new_nopbuf(void* start, size_t len, uint8_t fallthrough)
+{
+	if (nnopbufs == allocnopbufs) {
+		allocnopbufs += 1024;
+		nopbufs = realloc(nopbufs,sizeof(*nopbufs)*allocnopbufs);
+		assert(nopbufs);
+	}
+	nopbufs[nnopbufs] = (struct nopbuf) {
+		.start = start,
+		.len = len,
+		.fallthrough = fallthrough,
+	};
+	nnopbufs++;
+}
+
+static  void new_syspatch(void* start, uint8_t bytes, uint8_t insts)
+{
+	syspatches = realloc(syspatches,sizeof(*syspatches)*++nsyspatches);
+	assert(syspatches);
+	syspatches[nsyspatches-1] = (struct syspatch) {
+		start = start,
+		bytes = bytes,
+		insts = insts,
+	};
+
+	/* we can use "excess shadow bytes" as nopbufs too */
+	if (bytes - JMP_REL32_NBYTES >= 2)
+		new_nopbuf(start+JMP_REL32_NBYTES,bytes-JMP_REL32_NBYTES,0);
+}
+
+static void patchpass(struct trampmap* tm)
+{
+	int i,j;
+	ud_t ud;
+	struct syspatch* sp;
+	void* tfaddr;
+	struct inst orig, succs[3];
+	unsigned int succbytes, shadow;
+
+	for (i = 0, sp = syspatches; i < nsyspatches; sp++, i++) {
+		ud_init(&ud);
+		ud_set_input_buffer(&ud,sp->start,sp->bytes);
+		ud_set_syntax(&ud,UD_SYN_ATT);
+		ud_set_mode(&ud,64);
+		ud_set_pc(&ud,(uint64_t)sp->start);
+
+		ud_disassemble(&ud);
+		assert(ud_insn_len(&ud) == 2);
+		dup_ud_inst(&ud,&orig);
+		shadow = JMP_REL32_NBYTES - 2;
+		for (j = 0, succbytes = 0; j < shadow && succbytes < shadow; j++) {
+			ud_disassemble(&ud);
+			dup_ud_inst(&ud,&succs[j]);
+			succbytes += succs[j].len;
+		}
+		assert(succbytes >= shadow);
+
+		tfaddr = gentramp(&orig,succs,j,tm,(void*)ud.pc);
+		gentrampjmp(orig.pc,tfaddr);
+
+		for (j = 0; j < succbytes + 2 - JMP_REL32_NBYTES; j++)
+			*(uint8_t*)(orig.pc+JMP_REL32_NBYTES+j) = X86OP_INT3;
+	}
+}
+
+static void scanpass(void* buf, size_t len)
 {
 	ud_t ud;
 	struct inst orig;
 	struct inst succs[3]; /* successor instructions */
 	unsigned int found = 0;
 	unsigned int i,succbytes,shadow;
-	void* tfaddr;
+	int fallthrough = 0;
+	int nopbytes = 0;
 
 	ud_init(&ud);
 	ud_set_input_buffer(&ud,buf,len);
@@ -544,16 +628,47 @@ static unsigned int patch_sys_entries(void* buf, size_t len, struct trampmap* tm
 				dup_ud_inst(&ud,&succs[i]);
 				succbytes += succs[i].len;
 			}
-			tfaddr = gentramp(&orig,succs,i,tm,(void*)ud.pc);
-			gentrampjmp(orig.pc,tfaddr);
-			for (i = 0; i < succbytes + 2 - JMP_REL32_NBYTES; i++)
-				*(uint8_t*)(orig.pc+JMP_REL32_NBYTES+i) = X86OP_INT3;
+			assert(succbytes >= shadow);
+			new_syspatch(orig.pc,succbytes+2,i+1);
 			break;
+
 		default:
+			if (ud.mnemonic == UD_Inop) {
+				/* leave fallthrough as it is, bump nop count */
+				nopbytes += ud_insn_len(&ud);
+			} else {
+				/* minimum nopbuf to be useful is 2 bytes non-fallthrough
+				   or four bytes fallthrough */
+				if ((fallthrough && nopbytes >= 4)
+				    || (!fallthrough && nopbytes >= 2)) {
+					new_nopbuf((void*)ud.pc - ud_insn_len(&ud) - nopbytes,
+					           nopbytes,fallthrough);
+				}
+				fallthrough = (ud.mnemonic != UD_Iret
+				               && ud.mnemonic != UD_Ijmp);
+				nopbytes = 0;
+			}
 			break;
 		}
 	}
-	return found;
+}
+
+static void patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
+{
+	scanpass(buf,len);
+	patchpass(tm);
+
+	if (syspatches) {
+		free(syspatches);
+		syspatches = NULL;
+		nsyspatches = 0;
+	}
+	if (nopbufs) {
+		free(nopbufs);
+		nopbufs = NULL;
+		nnopbufs = 0;
+		allocnopbufs = 0;
+	}
 }
 
 struct map {
@@ -827,7 +942,7 @@ static void read_codesegs(int mapnum)
 
 		if (shdr.sh_addr < (uintptr_t)maps[mapnum].start
 		    || (shdr.sh_addr + shdr.sh_size) > (uintptr_t)maps[mapnum].end) {
-			fprintf(pllog,"%s:.%s section not contained in map %i",
+			fprintf(pllog,"%s:.%s section not contained in map %i\n",
 			        path,secname,mapnum);
 			abort();
 		}
@@ -850,7 +965,7 @@ static void read_codesegs(int mapnum)
 static void scan_and_patch(void)
 {
 	char* basename;
-	int i,tmnum,nfound;
+	int i,tmnum;
 	struct map* m;
 	struct codeseg* cs;
 
@@ -894,11 +1009,8 @@ static void scan_and_patch(void)
 	}
 
 	for (cs = codesegs, i = 0; i < ncodesegs; cs++, i++) {
-		nfound = patch_sys_entries(cs->start,cs->len,
-		                           &trampmaps[maps[cs->mapnum].tmnum]);
-		if (nfound)
-			fprintf(pllog,"%s[%s] (%p-%p): %i patched\n",cs->filename,
-			        cs->secname,cs->start,cs->start+cs->len,nfound);
+		patch_sys_entries(cs->start,cs->len,
+		                  &trampmaps[maps[cs->mapnum].tmnum]);
 	}
 }
 
