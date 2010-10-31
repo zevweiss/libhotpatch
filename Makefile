@@ -4,14 +4,22 @@ CDEBUG = -ggdb3
 COPT = -O0
 CFLAGS = $(CWARN) $(CDEBUG) $(COPT) -fPIC
 
+SLIBS = udis86
+DLIBS = dl elf
+
+LDSLIBS = $(addprefix -l,$(SLIBS))
+LDDLIBS = $(addprefix -l,$(DLIBS))
+
+LDFLAGS = -shared -Wl,-Bstatic $(LDSLIBS) -Wl,-Bdynamic $(LDDLIBS)
+
 default: lib752.so
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 lib752.so: lib752.o
-	$(CC) $(CFLAGS) -shared -Wl,-soname,$@ -o $@ $^ -ldl -Wl,-Bstatic -ludis86 -Wl,-Bdynamic
+	$(CC) $(CFLAGS) -Wl,-soname,$@ -o $@ $^ $(LDFLAGS)
 
 .PHONY: clean
 clean:
-	rm *.o lib752.so
+	rm -f *.o lib752.so

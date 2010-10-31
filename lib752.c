@@ -4,6 +4,9 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <assert.h>
 #include <dlfcn.h>
@@ -12,6 +15,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <libelf.h>
+#include <gelf.h>
 
 #include <udis86.h>
 
@@ -90,6 +95,14 @@ static void printargv(void)
 	fclose(argfile);
 }
 
+static void* memdup(void* orig, size_t len)
+{
+	void* new = malloc(len);
+	assert(new);
+	memcpy(new,orig,len);
+	return new;
+}
+
 static void rusage_hdr(void)
 {
 	fprintf(pllog,"%15s %12s %12s %10s %10s %8s %10s %10s\n","",
@@ -131,12 +144,7 @@ static int udinst_relocatable(ud_t* ud)
 	case UD_Ineg:
 	case UD_Ipop:
 	case UD_Ipush:
-		if (inst_opnd_rip_rel(ud)) {
-			fprintf(pllog,"warning: must relocate %s [%s]\n",
-			        ud_insn_asm(ud),ud_insn_hex(ud));
-			return 0;
-		} else
-			return 1;
+		return !inst_opnd_rip_rel(ud);
 
 	case UD_Ijmp:
 		if (ud->operand[0].type == UD_OP_JIMM)
@@ -229,11 +237,14 @@ static unsigned int ntrampmaps = 0;
  */
 #define X86OP_INT3 0xcc
 #define X86OP_JMP_REL32 0xe9
+#define X86OP_JCC_REL32 0x0f80
 
 #define JMP_REL32_NBYTES 5
 #define JCC_REL32_NBYTES 6
 #define JCC_REL8_NBYTES 2
-	
+
+#define X86_REX_W 0x48
+#define X86_REX_WR 0x4c
 
 /*
  * "Translate" an instruction for relocation from orig->pc to new->pc
@@ -244,12 +255,14 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 {
 	ud_t oud;
 	int64_t origofst,newofst;
-	uintptr_t jcctarg;
+	uintptr_t targ;
 	uint16_t jccop;
+	int ofstbyte;
 
 	inst_to_ud(orig,&oud);
 	if (udinst_relocatable(&oud)) {
-		*new = *orig;
+		new->bytes = memdup(orig->bytes,orig->len);
+		new->len = orig->len;
 		return;
 	}
 	switch (oud.mnemonic) {
@@ -279,7 +292,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 				abort();
 			}
 			assert((orig->bytes[0] & 0xf0) == 0x70);
-			jccop = 0x0f80 | (orig->bytes[0] & 0x0f);
+			jccop = X86OP_JCC_REL32 | (orig->bytes[0] & 0x0f);
 			break;
 		case 32:
 			origofst = oud.operand[0].lval.sdword;
@@ -288,10 +301,11 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 		default:
 			fprintf(pllog,"unknown jcc operand size (%i)\n",
 			        oud.operand[0].size);
+			abort();
 		}
 
-		jcctarg = (uintptr_t)orig->pc + orig->len + origofst;
-		newofst = (int64_t)jcctarg - ((int64_t)new->pc + JCC_REL32_NBYTES);
+		targ = (uintptr_t)orig->pc + orig->len + origofst;
+		newofst = (int64_t)targ - ((int64_t)new->pc + JCC_REL32_NBYTES);
 		if (newofst > INT32_MAX || newofst < INT32_MIN) {
 			fprintf(pllog,"jcc-rel32 can't reach target\n");
 			abort();
@@ -305,24 +319,131 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 		*(int32_t*)(&new->bytes[2]) = newofst;
 
 		return;
+
+	case UD_Ijmp:
+		if (oud.operand[0].type != UD_OP_JIMM) {
+			fprintf(pllog,"translation NYI for %s\n",ud_insn_asm(&oud));
+			abort();
+		}
+		switch (oud.operand[0].size) {
+		case 8:
+			origofst = oud.operand[0].lval.sbyte;
+			break;
+		case 32:
+			origofst = oud.operand[0].lval.sdword;
+			break;
+		default:
+			fprintf(pllog,"unknown jmp operand size (%i)\n",
+			        oud.operand[0].size);
+			abort();
+		}
+		targ = (uintptr_t)orig->pc + orig->len + origofst;
+		newofst = (int64_t)targ - ((int64_t)new->pc + JMP_REL32_NBYTES);
+		if (newofst > INT32_MAX || newofst < INT32_MIN) {
+			fprintf(pllog,"jmp-rel32 can't reach target\n");
+			abort();
+		}
+
+		new->len = JMP_REL32_NBYTES;
+		new->bytes = malloc(JMP_REL32_NBYTES);
+		assert(new->bytes);
+		new->bytes[0] = X86OP_JMP_REL32;
+		*(int32_t*)(&new->bytes[1]) = (int32_t)newofst;
+
+		return;
+
+	case UD_Imov:
+		if (oud.operand[0].type == UD_OP_REG) {
+			assert(oud.operand[1].type == UD_OP_MEM);
+			assert(oud.operand[1].base == UD_R_RIP);
+			assert(oud.operand[1].offset == 32);
+			assert(oud.operand[1].scale == 0);
+			assert(oud.operand[1].index == UD_NONE);
+			/* just copy & overwrite the offset */
+			new->bytes = memdup(orig->bytes,orig->len);
+			new->len = orig->len;
+			targ = (uintptr_t)orig->pc + orig->len + oud.operand[1].lval.sdword;
+			newofst = (int64_t)targ - ((int64_t)new->pc + new->len);
+			if (newofst > INT32_MAX || newofst < INT32_MIN) {
+				fprintf(pllog,"rip-relative mov can't reach target\n");
+				abort();
+			}
+
+			*(int32_t*)(&new->bytes[3]) = (int32_t)newofst;
+		} else {
+			assert(oud.operand[0].type == UD_OP_MEM);
+			assert(oud.operand[0].base == UD_R_RIP);
+			assert(oud.operand[0].offset == 32);
+			assert(oud.operand[0].scale == 0);
+			assert(oud.operand[0].index == UD_NONE);
+
+			/* again, just copying and overwriting, but
+			 * the offsets are in differing places */
+			new->bytes = memdup(orig->bytes,orig->len);
+			new->len = orig->len;
+			targ = (uintptr_t)orig->pc + orig->len + oud.operand[0].lval.sdword;
+			newofst = (int64_t)targ - ((int64_t)new->pc + new->len);
+			if (newofst > INT32_MAX || newofst < INT32_MIN) {
+				fprintf(pllog,"rip-relative mov can't reach target\n");
+				abort();
+			}
+
+			if (oud.operand[1].type == UD_OP_IMM) {
+				assert(oud.operand[1].size == 32
+				       || oud.operand[1].size == 8);
+				ofstbyte = 2;
+			} else if (oud.operand[1].type == UD_OP_REG) {
+				assert(oud.operand[1].size == 64);
+				ofstbyte = 3;
+			} else {
+				fprintf(pllog,"unhandled mov type: %s\t%s\n",
+				        ud_insn_hex(&oud),ud_insn_asm(&oud));
+				abort();
+			}
+
+			*(int32_t*)(&new->bytes[ofstbyte]) = (int32_t)newofst;
+		}
+		return;
+
+	case UD_Ilea:
+		/* copy & overwrite offset */
+		assert(oud.operand[0].type == UD_OP_REG);
+		assert(oud.operand[0].size == 64);
+		assert(oud.operand[1].type == UD_OP_MEM);
+		assert(oud.operand[1].base == UD_R_RIP);
+		assert(oud.operand[1].offset == 32);
+		assert(oud.operand[1].scale == 0);
+
+		new->bytes = memdup(orig->bytes,orig->len);
+		new->len = orig->len;
+		targ = (uintptr_t)orig->pc + orig->len + oud.operand[1].lval.sdword;
+		newofst = (int64_t)targ - ((int64_t)new->pc + new->len);
+		if (newofst > INT32_MAX || newofst < INT32_MIN) {
+			fprintf(pllog,"rip-relative lea can't reach target\n");
+			abort();
+		}
+		*(int32_t*)(&new->bytes[3]) = (int32_t)newofst;
+		return;
+
 	default:
-		fprintf(pllog,"warning: not translating %s\n",ud_insn_asm(&oud));
-		*new = *orig;
+		fprintf(pllog,"new translation required: %s\n",ud_insn_asm(&oud));
+		abort();
 	}
 }
 
 /*
  * Trampoline functions will start on 8-byte aligned addresses.
  */
-static void gentramp(const struct inst* orig, const struct inst* succs,
+static void* gentramp(const struct inst* orig, const struct inst* succs,
                      int nsuccs, struct trampmap* tm, void* retaddr)
 {
 	uint8_t* iptr;
+	void* funcaddr;
 	int i;
 	struct inst trans;
 	int64_t retofst;
 
-	iptr = tm->base + tm->used;
+	funcaddr = iptr = tm->base + tm->used;
 
 	assert((uintptr_t)iptr % 8 == 0);
 
@@ -362,16 +483,32 @@ static void gentramp(const struct inst* orig, const struct inst* succs,
 		*iptr++ = X86OP_INT3;
 		tm->used++;
 	}
-	return;
+
+	return funcaddr;
+}
+
+static void gentrampjmp(void* from, void* to)
+{
+	int64_t ofst;
+
+	ofst = to - (from + JMP_REL32_NBYTES);
+	if (ofst > INT32_MAX || ofst < INT32_MIN) {
+		fprintf(pllog,"trampoline jump can't reach target\n");
+		abort();
+	}
+
+	*(uint8_t*)from = X86OP_JMP_REL32;
+	*(int32_t*)(from+1) = (int32_t)ofst;
 }
 
 static unsigned int patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
 {
 	ud_t ud;
 	struct inst orig;
-	struct inst succs[3];	/* successor instructions */
+	struct inst succs[3]; /* successor instructions */
 	unsigned int found = 0;
-	unsigned int i,succbytes;
+	unsigned int i,succbytes,shadow;
+	void* tfaddr;
 
 	ud_init(&ud);
 	ud_set_input_buffer(&ud,buf,len);
@@ -391,12 +528,16 @@ static unsigned int patch_sys_entries(void* buf, size_t len, struct trampmap* tm
 			++found;
 			assert(ud_insn_len(&ud) == 2);
 			dup_ud_inst(&ud,&orig);
-			for (i = 0, succbytes = 0; i < 3 && succbytes < 3; i++) {
+			shadow = JMP_REL32_NBYTES - 2;
+			for (i = 0, succbytes = 0; i < shadow && succbytes < shadow; i++) {
 				ud_disassemble(&ud);
 				dup_ud_inst(&ud,&succs[i]);
 				succbytes += succs[i].len;
 			}
-			gentramp(&orig,succs,i,tm,(void*)ud.pc);
+			tfaddr = gentramp(&orig,succs,i,tm,(void*)ud.pc);
+			gentrampjmp(orig.pc,tfaddr);
+			for (i = 0; i < succbytes + 2 - JMP_REL32_NBYTES; i++)
+				*(uint8_t*)(orig.pc+JMP_REL32_NBYTES+i) = X86OP_INT3;
 			break;
 		default:
 			break;
@@ -416,8 +557,19 @@ struct map {
 	int tmnum;
 };
 
+struct codeseg {
+	void* start;
+	size_t len;
+	int mapnum;
+	char* secname;
+	char* filename;
+};
+
 static struct map* maps = NULL;
 static unsigned int nmaps = 0;
+
+static struct codeseg* codesegs = NULL;
+static unsigned int ncodesegs = 0;
 
 static int perms_to_prot(char str[4])
 {
@@ -443,7 +595,7 @@ static int mapcmp(const void* a, const void* b)
 }
 
 /* snapshot the proc's memory maps before we start messing with things */
-void read_maps(void)
+static void read_maps(void)
 {
 	FILE* procmaps;
 	void* start;
@@ -494,7 +646,7 @@ void read_maps(void)
 static int new_trampmap(void* base, int origmap)
 {
 	void* tmbase;
-	assert((uintptr_t)base % getpagesize() == 0);
+	assert((uintptr_t)base % sysconf(_SC_PAGESIZE) == 0);
 
 	tmbase = mmap(base,TRAMPMAP_MIN_SIZE,
 	              PROT_READ|PROT_WRITE|PROT_EXEC,
@@ -579,21 +731,141 @@ static void print_maps(void)
 	}
 }
 
-static void find_text(void)
+static int map_path(const char* path, void** base, size_t* len)
+{
+	int fd;
+	struct stat st;
+
+	if ((fd = open(path,O_RDONLY)) == -1) {
+		fprintf(pllog,"failed to open '%s': %s\n",path,strerror(errno));
+		return -1;
+	}
+
+	if ((fstat(fd,&st)) == -1) {
+		fprintf(pllog,"failed to stat(2) '%s': %s\n",path,strerror(errno));
+		close(fd);
+		return -1;
+	}
+
+	*base = mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
+	if (*base == MAP_FAILED) {
+		fprintf(pllog,"failed to mmap '%s': %s\n",path,strerror(errno));
+		*base = NULL;
+		close(fd);
+		return -1;
+	}
+
+	*len = st.st_size;
+
+	close(fd);
+
+	return 0;
+}
+
+static void read_codesegs(int mapnum)
+{
+	void* base;
+	size_t len;
+	unsigned int elfversion;
+	char* path;
+	char* secname;
+	Elf* elf;
+	Elf_Scn* esec;
+	GElf_Shdr shdr;
+	size_t shstrndx;
+
+	path = maps[mapnum].path;
+	elfversion = elf_version(EV_CURRENT);
+	assert(elfversion != EV_NONE);
+
+	if (map_path(path,&base,&len)) {
+		fprintf(pllog,"failed to mmap '%s': %s\n",path,strerror(errno));
+		abort();
+	}
+
+	if (!(elf = elf_memory(base,len))) {
+		fprintf(pllog,"libelf elf_memory() failed: %s\n",elf_errmsg(-1));
+		abort();
+	}
+
+	if (elf_kind(elf) != ELF_K_ELF) {
+		fprintf(pllog,"%s not an ELF??\n",path);
+		abort();
+	}
+
+	if (elf_getshdrstrndx(elf,&shstrndx)) {
+		fprintf(pllog,"elf_getshstrndx() failed: %s\n",elf_errmsg(-1));
+		abort();
+	}
+
+	esec = NULL;
+	while ((esec = elf_nextscn(elf,esec))) {
+		if (gelf_getshdr(esec,&shdr) != &shdr) {
+			fprintf(pllog,"gelf_getshdr failed\n");
+			abort();
+		}
+
+		if ((shdr.sh_type != SHT_PROGBITS)
+		    || !(shdr.sh_flags & SHF_ALLOC)
+		    || !(shdr.sh_flags & SHF_EXECINSTR))
+			continue;
+
+		if (!(secname = elf_strptr(elf,shstrndx,shdr.sh_name))) {
+			fprintf(pllog,"elf_strptr() failed: %s\n",elf_errmsg(-1));
+			abort();
+		}
+
+		if (shdr.sh_addr < (uintptr_t)maps[mapnum].start
+		    || (shdr.sh_addr + shdr.sh_size) > (uintptr_t)maps[mapnum].end) {
+			fprintf(pllog,"%s:.%s section not contained in map %i",
+			        path,secname,mapnum);
+			abort();
+		}
+
+		codesegs = realloc(codesegs,sizeof(*codesegs)*++ncodesegs);
+		assert(codesegs);
+		codesegs[ncodesegs-1] = (struct codeseg) {
+			.start = (void*)shdr.sh_addr,
+			.len = shdr.sh_size,
+			.mapnum = mapnum,
+			.secname = strdup(secname),
+			.filename = strdup(path),
+		};
+	}
+
+	elf_end(elf);
+	munmap(base,len);
+}
+
+static void scan_and_patch(void)
 {
 	char* basename;
-	int i,nfound = 0,tmnum;
+	int i,tmnum,nfound;
 	struct map* m;
-
-	read_maps();
+	struct codeseg* cs;
 
 	for (m = maps, i = 0; i < nmaps; m++, i++) {
 		if (m->prot & PROT_EXEC) {
+
+			/* don't scan/patch our own code */
 			if ((basename = strrchr(m->path,'/'))
-			    && !strcmp(basename+1,"lib752.so"))
+			    && (!strcmp(basename+1,"lib752.so")
+			        || !strncmp(basename+1,"libelf.so",
+			                    strlen("libelf.so"))))
 				continue;
-//			fprintf(pllog,"found executable map from '%s'\n",m->path);
+
+			if (!strcmp(m->path,"[vdso]")
+			    || !strcmp(m->path,"[vsyscall]"))
+				continue;
+
+			if (mprotect(m->start,m->end-m->start,m->prot|PROT_WRITE)) {
+				fprintf(pllog,"mprotect failed on map %i (%s): %s\n",
+				        i,m->path,strerror(errno));
+				abort();
+			}
+
 			tmnum = get_trampmap(i);
+
 			if (tmnum == -1) {
 				fprintf(pllog,"mmap failed for %s trampoline area",
 				        maps[i].path);
@@ -605,11 +877,18 @@ static void find_text(void)
 					abort();
 				}
 			} else {
-				nfound = patch_sys_entries(m->start,m->end - m->start,
-				                           &trampmaps[tmnum]);
-//				fprintf(pllog,"  %i sysentry points found\n",nfound);
+				m->tmnum = tmnum;
+				read_codesegs(i);
 			}
 		}
+	}
+
+	for (cs = codesegs, i = 0; i < ncodesegs; cs++, i++) {
+		nfound = patch_sys_entries(cs->start,cs->len,
+		                           &trampmaps[maps[cs->mapnum].tmnum]);
+		if (nfound)
+			fprintf(pllog,"%s[%s] (%p-%p): %i found\n",cs->filename,
+			        cs->secname,cs->start,cs->start+cs->len,nfound);
 	}
 }
 
@@ -625,7 +904,9 @@ static void lib752_init(void)
 	pllog = fopen("./log","a");
 	assert(pllog);
 	printargv();
-	find_text();
+
+	read_maps();
+	scan_and_patch();
 
 	rusage_hdr();
 
