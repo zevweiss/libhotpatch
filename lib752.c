@@ -592,6 +592,7 @@ static inline void* scratchbuf_dest(const struct scratchbuf* sb)
 }
 
 /*
+ * For use with bsearch().
  * FIXME: could check for bufs we can reach the end of, but not the beginning.
  */
 static int bufsearch_compar(const void* startpt, const void* scratchbuf)
@@ -934,7 +935,7 @@ static void scanpass(void* buf, size_t len)
 {
 	ud_t ud;
 	unsigned int nopbytes;
-	int fallthrough;
+	int fallthrough,holdoff = 0;
 
 	ud_init(&ud);
 	ud_set_input_buffer(&ud,buf,len);
@@ -947,7 +948,8 @@ static void scanpass(void* buf, size_t len)
 
 		case UD_Ifnop:
 		case UD_Inop:
-			nopbytes += ud_insn_len(&ud);
+			if (!holdoff)
+				nopbytes += ud_insn_len(&ud);
 			break;
 
 		default:
@@ -968,71 +970,20 @@ static void scanpass(void* buf, size_t len)
 			    || (ud.mnemonic == UD_Iint
 			        && ud.operand[0].lval.ubyte == 0x80)) {
 				new_syscall((void*)ud.pc - ud_insn_len(&ud));
+				/* don't count nops that might fall in
+				 * this syscall's "shadow", so we don't
+				 * end up with patch collisions */
+				holdoff = JMP_REL32_NBYTES;
 			}
 
 			break;
 		}
+
+		holdoff -= ud_insn_len(&ud);
+		if (holdoff < 0)
+			holdoff = 0;
 	}
 }
-
-/* static void x_scanpass(void* buf, size_t len) */
-/* { */
-/* 	ud_t ud; */
-/* 	struct inst orig; */
-/* 	struct inst succs[3]; /\* successor instructions *\/ */
-/* 	unsigned int found = 0; */
-/* 	unsigned int i,succbytes,shadow; */
-/* 	int fallthrough = 0; */
-/* 	int nopbytes = 0; */
-
-/* 	ud_init(&ud); */
-/* 	ud_set_input_buffer(&ud,buf,len); */
-/* 	ud_set_syntax(&ud,UD_SYN_ATT); */
-/* 	ud_set_mode(&ud,64); */
-/* 	ud_set_pc(&ud,(uint64_t)buf); */
-
-/* 	while (ud_disassemble(&ud)) { */
-/* 		switch (ud.mnemonic) { */
-/* 		case UD_Iint: */
-/* 			assert(ud.operand[0].type == UD_OP_IMM); */
-/* 			if (ud.operand[0].lval.ubyte != 0x80) */
-/* 				break; */
-/* 			/\* otherwise fall through *\/ */
-/* 		case UD_Isyscall: */
-/* 		case UD_Isysenter: */
-/* 			++found; */
-/* 			assert(ud_insn_len(&ud) == 2); */
-/* 			dup_ud_inst(&ud,&orig); */
-/* 			shadow = JMP_REL32_NBYTES - 2; */
-/* 			for (i = 0, succbytes = 0; i < shadow && succbytes < shadow; i++) { */
-/* 				ud_disassemble(&ud); */
-/* 				dup_ud_inst(&ud,&succs[i]); */
-/* 				succbytes += succs[i].len; */
-/* 			} */
-/* 			assert(succbytes >= shadow); */
-/* 			new_syspatch(orig.pc,succbytes+2,i+1); */
-/* 			break; */
-
-/* 		default: */
-/* 			if (ud.mnemonic == UD_Inop) { */
-/* 				/\* leave fallthrough as it is, bump nop count *\/ */
-/* 				nopbytes += ud_insn_len(&ud); */
-/* 			} else { */
-/* 				/\* minimum nopbuf to be useful is 2 bytes non-fallthrough */
-/* 				   or four bytes fallthrough *\/ */
-/* 				if ((fallthrough && nopbytes >= 4) */
-/* 				    || (!fallthrough && nopbytes >= 2)) { */
-/* 					new_nopbuf((void*)ud.pc - ud_insn_len(&ud) - nopbytes, */
-/* 					           nopbytes,fallthrough); */
-/* 				} */
-/* 				fallthrough = (ud.mnemonic != UD_Iret */
-/* 				               && ud.mnemonic != UD_Ijmp); */
-/* 				nopbytes = 0; */
-/* 			} */
-/* 			break; */
-/* 		} */
-/* 	} */
-/* } */
 
 static void patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
 {
@@ -1045,11 +996,6 @@ static void patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
 		nsyscalls = 0;
 	}
 
-/* 	if (syspatches) { */
-/* 		free(syspatches); */
-/* 		syspatches = NULL; */
-/* 		nsyspatches = 0; */
-/* 	} */
 	if (nopbufs) {
 		free(nopbufs);
 		nopbufs = NULL;
