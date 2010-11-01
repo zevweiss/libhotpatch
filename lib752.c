@@ -238,15 +238,18 @@ static struct trampmap* trampmaps = NULL;
 static unsigned int ntrampmaps = 0;
 
 /*
- * Used as a filler byte in trampoline areas so we'll trap in case
+ * int3 used as a filler byte in trampoline areas so we'll trap in case
  * anything goes unexpectedly out of bounds.
  */
 #define X86OP_INT3 0xcc
 #define X86OP_JMP_REL32 0xe9
+#define X86OP_JMP_REL8 0xeb
 #define X86OP_CALL_REL32 0xe8
 #define X86OP_JCC_REL32 0x0f80
+#define X86OP_NOP 0x90
 
 #define JMP_REL32_NBYTES 5
+#define JMP_REL8_NBYTES 2
 #define JCC_REL32_NBYTES 6
 #define JCC_REL8_NBYTES 2
 
@@ -511,23 +514,29 @@ static void gentrampjmp(void* from, void* to)
 	*(int32_t*)(from+1) = (int32_t)ofst;
 }
 
-struct nopbuf {
+struct scratchbuf {
 	void* start;
 	size_t len;
 	uint8_t fallthrough;
 };
 
-struct nopbuf* nopbufs = NULL;
-unsigned int nnopbufs = 0;
-unsigned int allocnopbufs = 0;
+static struct scratchbuf* nopbufs = NULL;
+static unsigned int nnopbufs = 0;
+static unsigned int allocnopbufs = 0;
 
-struct syspatch {
-	void* start;
-	uint8_t bytes, insts;
-};
+static void** syscalls = NULL;
+static unsigned int nsyscalls = 0;
 
-struct syspatch* syspatches = NULL;
-unsigned int nsyspatches = 0;
+/* struct syspatch { */
+/* 	void* start; */
+/* 	uint8_t bytes, insts; */
+/* }; */
+
+/* static struct syspatch* syspatches = NULL; */
+/* static unsigned int nsyspatches = 0; */
+
+/* static struct scratchbuf* int3bufs = NULL; */
+/* static unsigned int nint3bufs = 0; */
 
 static void new_nopbuf(void* start, size_t len, uint8_t fallthrough)
 {
@@ -536,7 +545,7 @@ static void new_nopbuf(void* start, size_t len, uint8_t fallthrough)
 		nopbufs = realloc(nopbufs,sizeof(*nopbufs)*allocnopbufs);
 		assert(nopbufs);
 	}
-	nopbufs[nnopbufs] = (struct nopbuf) {
+	nopbufs[nnopbufs] = (struct scratchbuf) {
 		.start = start,
 		.len = len,
 		.fallthrough = fallthrough,
@@ -544,65 +553,378 @@ static void new_nopbuf(void* start, size_t len, uint8_t fallthrough)
 	nnopbufs++;
 }
 
-static  void new_syspatch(void* start, uint8_t bytes, uint8_t insts)
+static void new_syscall(void* addr)
 {
-	syspatches = realloc(syspatches,sizeof(*syspatches)*++nsyspatches);
-	assert(syspatches);
-	syspatches[nsyspatches-1] = (struct syspatch) {
-		start = start,
-		bytes = bytes,
-		insts = insts,
-	};
-
-	/* we can use "excess shadow bytes" as nopbufs too */
-	if (bytes - JMP_REL32_NBYTES >= 2)
-		new_nopbuf(start+JMP_REL32_NBYTES,bytes-JMP_REL32_NBYTES,0);
+	syscalls = realloc(syscalls,sizeof(void*)*++nsyscalls);
+	assert(syscalls);
+	syscalls[nsyscalls-1] = addr;
 }
 
-static void patchpass(struct trampmap* tm)
+/* static  void new_syspatch(void* start, uint8_t bytes, uint8_t insts) */
+/* { */
+/* 	syspatches = realloc(syspatches,sizeof(*syspatches)*++nsyspatches); */
+/* 	assert(syspatches); */
+/* 	syspatches[nsyspatches-1] = (struct syspatch) { */
+/* 		start = start, */
+/* 		bytes = bytes, */
+/* 		insts = insts, */
+/* 	}; */
+/* } */
+
+/*
+ * Predicate: whether a jmp-rel8 at start can reach dest
+ */
+static inline int within_rel8(const void* start, const void* dest)
 {
-	int i,j;
-	ud_t ud;
-	struct syspatch* sp;
-	void* tfaddr;
-	struct inst orig, succs[3];
-	unsigned int succbytes, shadow;
+	const void* relpt = start + JMP_REL8_NBYTES;
+	int64_t ofst = dest - relpt;
+	return ofst <= INT8_MAX && ofst >= INT8_MIN;
+}
 
-	for (i = 0, sp = syspatches; i < nsyspatches; sp++, i++) {
-		ud_init(&ud);
-		ud_set_input_buffer(&ud,sp->start,sp->bytes);
-		ud_set_syntax(&ud,UD_SYN_ATT);
-		ud_set_mode(&ud,64);
-		ud_set_pc(&ud,(uint64_t)sp->start);
+/* where in the buffer we'll jump to, accounting for patch-branch at
+ * the start of fallthrough bufs */
+static inline void* scratchbuf_dest(const struct scratchbuf* sb)
+{
+	if (sb->fallthrough)
+		return sb->start + JMP_REL8_NBYTES;
+	else
+		return sb->start;
+}
 
-		ud_disassemble(&ud);
-		assert(ud_insn_len(&ud) == 2);
-		dup_ud_inst(&ud,&orig);
-		shadow = JMP_REL32_NBYTES - 2;
-		for (j = 0, succbytes = 0; j < shadow && succbytes < shadow; j++) {
-			ud_disassemble(&ud);
-			dup_ud_inst(&ud,&succs[j]);
-			succbytes += succs[j].len;
+/*
+ * FIXME: could check for bufs we can reach the end of, but not the beginning.
+ */
+static int bufsearch_compar(const void* startpt, const void* scratchbuf)
+{
+	const struct scratchbuf* buf = scratchbuf;
+	const void* dst = scratchbuf_dest(buf);
+	if (buf->len < 2
+	    || (buf->len < 4 && buf->fallthrough)
+	    || !within_rel8(startpt,dst)) {
+		if (startpt < dst)
+			return -1;
+		else if (startpt > dst)
+			return 1;
+		else
+			abort();
+	}
+
+	/* if we get here, we know it's within range and large enough
+	 * to be useful */
+	return 0;
+}
+
+static inline int scratchbuf_fits_jmprel32(struct scratchbuf* sb)
+{
+	if (sb->fallthrough)
+		/* jmp-rel32 to go where we want and a jmp-rel8 to
+		 * jump over the inserted jmp-rel32 */
+		return sb->len >= (JMP_REL32_NBYTES + JMP_REL8_NBYTES);
+	else
+		/* if no fallthrough, don't need to jump-over jmp */
+		return sb->len >= JMP_REL32_NBYTES;
+}
+
+static inline int scratchbuf_usable(const struct scratchbuf* sb)
+{
+	if (!sb->fallthrough)
+		return sb->len >= JMP_REL8_NBYTES;
+	else
+		return sb->len >= (JMP_REL8_NBYTES + JMP_REL8_NBYTES);
+}
+
+static inline int can_link(const struct scratchbuf* from, const struct scratchbuf* to)
+{
+	if (!scratchbuf_usable(from))
+		return 0;
+	return within_rel8(scratchbuf_dest(from),scratchbuf_dest(to));
+}
+
+static inline struct scratchbuf* next_scratchbuf(struct scratchbuf* sb)
+{
+	struct scratchbuf* i;
+	for (i = sb+1; i < nopbufs+nnopbufs; i++) {
+		if (scratchbuf_usable(i))
+			return i;
+	}
+	return NULL;
+}
+
+static inline struct scratchbuf* prev_scratchbuf(struct scratchbuf* sb)
+{
+	struct scratchbuf* i;
+	for (i = sb-1; i >= nopbufs; i--) {
+		if (scratchbuf_usable(i))
+			return i;
+	}
+	return NULL;
+}
+
+/*
+ * See if there's a path through any scratchbufs we've found to one
+ * that's big enough to fit a jmp-rel32.
+ *
+ * If found, returns the address of the first one in the chain, else
+ * NULL.  Caller can scan in that direction until it finds a
+ * sufficiently large scratchbuf.
+ */
+static struct scratchbuf* find_scratchpath(void* startpt)
+{
+	struct scratchbuf* firstfound;
+	struct scratchbuf* iter;
+	struct scratchbuf* next;
+	struct scratchbuf* firststep;
+
+	firstfound = bsearch(startpt,nopbufs,nnopbufs,
+	                     sizeof(*nopbufs),bufsearch_compar);
+
+	/* check if any were reachable */
+	if (!firstfound)
+		return NULL;
+
+	iter = firststep = firstfound;
+
+	/* first try to go forward */
+	for (;;) {
+		next = next_scratchbuf(iter);
+		/* if we've reached a usable one, cool */
+		if (scratchbuf_fits_jmprel32(iter)) {
+			if (within_rel8(startpt,scratchbuf_dest(iter)))
+				return iter;
+			if (((iter->start < firststep->start)
+			     && (firststep->start < startpt))
+			    || ((iter->start > firststep->start)
+			        && (firststep->start > startpt)))
+				return firststep;
+			/* I think that should cover it? If not, blow up. */
+			abort();
 		}
-		assert(succbytes >= shadow);
 
-		tfaddr = gentramp(&orig,succs,j,tm,(void*)ud.pc);
-		gentrampjmp(orig.pc,tfaddr);
+		/* give up if we've reached the end of the scratchbuf
+		 * array or we can't reach the next one */
+		if (!next
+		    || (!can_link(iter,next)
+		        && !within_rel8(startpt,scratchbuf_dest(next))))
+			break;
 
-		for (j = 0; j < succbytes + 2 - JMP_REL32_NBYTES; j++)
-			*(uint8_t*)(orig.pc+JMP_REL32_NBYTES+j) = X86OP_INT3;
+		/* otherwise we'll move on to the next one, but first
+		 * check if we're about to cross startpt -- if so,
+		 * adjust firststep accordingly */
+		if (next->start > startpt && iter->start < startpt)
+			firststep = next;
+
+		iter = next;
+	}
+
+	/* if we get here, we didn't find anything going forward.  reinitialize. */
+	iter = firststep = firstfound;
+
+	/* similar to above, but searching backward */
+	for (;;) {
+		next = prev_scratchbuf(iter);
+		/* if we've reach a usable one, cool */
+		if (scratchbuf_fits_jmprel32(iter)) {
+			if (within_rel8(startpt,scratchbuf_dest(iter)))
+				return iter;
+			if (((iter->start < firststep->start)
+			     && (firststep->start < startpt))
+			    || ((iter->start > firststep->start)
+			        && (firststep->start > startpt)))
+				return firststep;
+			/* I think that should cover it?  If not, blow up. */
+			abort();
+		}
+
+		/* give up if we've reach the end of the scratchbuf
+		 * array or we can't reach the next one. */
+		if (!next
+		    || (!can_link(iter,next)
+		        && !within_rel8(startpt,scratchbuf_dest(next))))
+			break;
+
+		/* otherwise we'll move on to the next one, but first
+		 * check to see if we're about to cross startpt -- if
+		 * so, adjust firststep accordingly */
+		if (next->start < startpt && iter->start > startpt)
+			firststep = next;
+
+		iter = next;
+	}
+
+	/* if we get here, couldn't find anything */
+	return NULL;
+}
+
+/* generate a jmp-rel8 at org to dst */
+static void genjmprel8(void* org, void* dst)
+{
+	int64_t ofst = dst - (org+JMP_REL8_NBYTES);
+	assert(ofst <= INT8_MAX && ofst >= INT8_MIN);
+	*(uint8_t*)org = X86OP_JMP_REL8;
+	*(uint8_t*)(org+1) = (int8_t)ofst;
+}
+
+/* generate a jmp-rel32 at org to dst */
+static void genjmprel32(void* org, void* dst)
+{
+	int64_t ofst = dst - (org+JMP_REL32_NBYTES);
+	assert(ofst <= INT32_MAX && ofst >= INT32_MIN);
+	*(uint8_t*)org = X86OP_JMP_REL32;
+	*(int32_t*)(org+1) = (int32_t)ofst;
+}
+
+static void patch_jmpchain(void* syscall, struct scratchbuf* firstlink,
+                           void* dest, struct trampmap* tm)
+{
+	ud_t ud;
+	uint8_t sci_bytes[2];
+	void* org;
+	struct scratchbuf* link;
+	struct scratchbuf* prevlink;
+	struct scratchbuf* (*nextbuf)(struct scratchbuf*);
+	struct inst scinst = {
+		.bytes = sci_bytes,
+		.len = 2,
+		.pc = syscall,
+	};
+
+	memcpy(sci_bytes,syscall,sizeof(sci_bytes));
+	inst_to_ud(&scinst,&ud);
+
+	assert(ud.mnemonic == UD_Isyscall
+	       || ud.mnemonic == UD_Isysenter
+	       || (ud.mnemonic == UD_Iint
+	           && ud.operand[0].lval.ubyte == 0x80));
+
+	if (firstlink->start > syscall)
+		nextbuf = next_scratchbuf;
+	else
+		nextbuf = prev_scratchbuf;
+
+	prevlink = NULL;
+	link = firstlink;
+	org = syscall;
+	for (;;) {
+		/* check if we can use this as the final link */
+		if (link->len >= JMP_REL32_NBYTES + JMP_REL8_NBYTES
+		    || (!link->fallthrough && link->len >= JMP_REL32_NBYTES)) {
+			if (link->fallthrough) {
+				/* short jmp over the rest of the buffer */
+				genjmprel8(link->start,
+				           link->start+link->len);
+				/* after that insertion, fallthrough bufs no longer are */
+				link->fallthrough = 0;
+				link->start += JMP_REL8_NBYTES;
+				link->len -= JMP_REL8_NBYTES;
+			}
+			genjmprel8(org,link->start);
+			if (prevlink) {
+				prevlink->start += JMP_REL8_NBYTES;
+				prevlink->len -= JMP_REL8_NBYTES;
+			}
+
+			genjmprel32(link->start,dest);
+			link->start += JMP_REL32_NBYTES;
+			link->len -= JMP_REL32_NBYTES;
+			assert(link->len >= 0);
+
+			/* make sure we don't leave any partial-nops lying around */
+			memset(link->start,X86OP_NOP,link->len);
+			break;
+		} else {
+			if (link->fallthrough) {
+				/* short jmp over the rest of the buffer */
+				genjmprel8(link->start,
+				           link->start+link->len);
+				/* after that insertion, fallthrough bufs no longer are */
+				link->fallthrough = 0;
+				link->start += JMP_REL8_NBYTES;
+				link->len -= JMP_REL8_NBYTES;
+			}
+
+			assert(link->len >= JMP_REL8_NBYTES);
+
+			/* don't leave any partial-nops lying around */
+			memset(link->start,X86OP_NOP,link->len);
+
+			genjmprel8(org,link->start);
+			if (prevlink) {
+				prevlink->start += JMP_REL8_NBYTES;
+				prevlink->len -= JMP_REL8_NBYTES;
+			}
+
+			org = link->start;
+			prevlink = link;
+			link = nextbuf(link);
+		}
 	}
 }
 
+static void syspatchpass(struct trampmap* tm)
+{
+	int i;
+	struct scratchbuf* scratchlink;
+	struct inst scinst;
+	void* tfaddr;
+
+	for (i = 0; i < nsyscalls; i++) {
+		scinst = (struct inst) {
+			.bytes = syscalls[i],
+			.len = 2,
+			.pc = syscalls[i],
+		};
+		scratchlink = find_scratchpath(syscalls[i]);
+		if (scratchlink) {
+			tfaddr = gentramp(&scinst,NULL,0,tm,syscalls[i]+2);
+			patch_jmpchain(syscalls[i],scratchlink,tfaddr,tm);
+		}
+	}
+}
+
+/* static void syspatchpass(struct trampmap* tm) */
+/* { */
+/* 	int i,j; */
+/* 	ud_t ud; */
+/* 	struct syspatch* sp; */
+/* 	void* tfaddr; */
+/* 	struct inst orig, succs[3]; */
+/* 	unsigned int succbytes, shadow; */
+
+/* 	for (i = 0, sp = syspatches; i < nsyspatches; sp++, i++) { */
+/* 		ud_init(&ud); */
+/* 		ud_set_input_buffer(&ud,sp->start,sp->bytes); */
+/* 		ud_set_syntax(&ud,UD_SYN_ATT); */
+/* 		ud_set_mode(&ud,64); */
+/* 		ud_set_pc(&ud,(uint64_t)sp->start); */
+
+/* 		ud_disassemble(&ud); */
+/* 		assert(ud_insn_len(&ud) == 2); */
+/* 		dup_ud_inst(&ud,&orig); */
+/* 		shadow = JMP_REL32_NBYTES - 2; */
+/* 		for (j = 0, succbytes = 0; j < shadow && succbytes < shadow; j++) { */
+/* 			ud_disassemble(&ud); */
+/* 			dup_ud_inst(&ud,&succs[j]); */
+/* 			succbytes += succs[j].len; */
+/* 		} */
+/* 		assert(succbytes >= shadow); */
+
+/* 		tfaddr = gentramp(&orig,succs,j,tm,(void*)ud.pc); */
+/* 		gentrampjmp(orig.pc,tfaddr); */
+
+/* 		for (j = 0; j < succbytes + 2 - JMP_REL32_NBYTES; j++) */
+/* 			*(uint8_t*)(orig.pc+JMP_REL32_NBYTES+j) = X86OP_INT3; */
+/* 	} */
+/* } */
+
+/*
+ * Finds and record usefully-sized nop buffers and locations of
+ * syscall instructions.
+ */
 static void scanpass(void* buf, size_t len)
 {
 	ud_t ud;
-	struct inst orig;
-	struct inst succs[3]; /* successor instructions */
-	unsigned int found = 0;
-	unsigned int i,succbytes,shadow;
-	int fallthrough = 0;
-	int nopbytes = 0;
+	unsigned int nopbytes;
+	int fallthrough;
 
 	ud_init(&ud);
 	ud_set_input_buffer(&ud,buf,len);
@@ -612,57 +934,112 @@ static void scanpass(void* buf, size_t len)
 
 	while (ud_disassemble(&ud)) {
 		switch (ud.mnemonic) {
-		case UD_Iint:
-			assert(ud.operand[0].type == UD_OP_IMM);
-			if (ud.operand[0].lval.ubyte != 0x80)
-				break;
-			/* otherwise fall through */
-		case UD_Isyscall:
-		case UD_Isysenter:
-			++found;
-			assert(ud_insn_len(&ud) == 2);
-			dup_ud_inst(&ud,&orig);
-			shadow = JMP_REL32_NBYTES - 2;
-			for (i = 0, succbytes = 0; i < shadow && succbytes < shadow; i++) {
-				ud_disassemble(&ud);
-				dup_ud_inst(&ud,&succs[i]);
-				succbytes += succs[i].len;
-			}
-			assert(succbytes >= shadow);
-			new_syspatch(orig.pc,succbytes+2,i+1);
+
+		case UD_Ifnop:
+		case UD_Inop:
+			nopbytes += ud_insn_len(&ud);
 			break;
 
 		default:
-			if (ud.mnemonic == UD_Inop) {
-				/* leave fallthrough as it is, bump nop count */
-				nopbytes += ud_insn_len(&ud);
-			} else {
-				/* minimum nopbuf to be useful is 2 bytes non-fallthrough
-				   or four bytes fallthrough */
-				if ((fallthrough && nopbytes >= 4)
-				    || (!fallthrough && nopbytes >= 2)) {
-					new_nopbuf((void*)ud.pc - ud_insn_len(&ud) - nopbytes,
-					           nopbytes,fallthrough);
-				}
-				fallthrough = (ud.mnemonic != UD_Iret
-				               && ud.mnemonic != UD_Ijmp);
-				nopbytes = 0;
+			if ((fallthrough && nopbytes >= 4)
+			    || (!fallthrough && nopbytes >= 2)) {
+				new_nopbuf((void*)ud.pc - ud_insn_len(&ud) - nopbytes,
+				           nopbytes,fallthrough);
 			}
+			/* We're operating on the assumption that a
+			 * jmp/call won't be pointed at a nop in the
+			 * next few bytes */
+			fallthrough = (ud.mnemonic != UD_Iret
+			               && ud.mnemonic != UD_Ijmp);
+			nopbytes = 0;
+
+			if (ud.mnemonic == UD_Isyscall
+			    || ud.mnemonic == UD_Isysenter
+			    || (ud.mnemonic == UD_Iint
+			        && ud.operand[0].lval.ubyte == 0x80)) {
+				new_syscall((void*)ud.pc - ud_insn_len(&ud));
+			}
+
 			break;
 		}
 	}
 }
 
+/* static void x_scanpass(void* buf, size_t len) */
+/* { */
+/* 	ud_t ud; */
+/* 	struct inst orig; */
+/* 	struct inst succs[3]; /\* successor instructions *\/ */
+/* 	unsigned int found = 0; */
+/* 	unsigned int i,succbytes,shadow; */
+/* 	int fallthrough = 0; */
+/* 	int nopbytes = 0; */
+
+/* 	ud_init(&ud); */
+/* 	ud_set_input_buffer(&ud,buf,len); */
+/* 	ud_set_syntax(&ud,UD_SYN_ATT); */
+/* 	ud_set_mode(&ud,64); */
+/* 	ud_set_pc(&ud,(uint64_t)buf); */
+
+/* 	while (ud_disassemble(&ud)) { */
+/* 		switch (ud.mnemonic) { */
+/* 		case UD_Iint: */
+/* 			assert(ud.operand[0].type == UD_OP_IMM); */
+/* 			if (ud.operand[0].lval.ubyte != 0x80) */
+/* 				break; */
+/* 			/\* otherwise fall through *\/ */
+/* 		case UD_Isyscall: */
+/* 		case UD_Isysenter: */
+/* 			++found; */
+/* 			assert(ud_insn_len(&ud) == 2); */
+/* 			dup_ud_inst(&ud,&orig); */
+/* 			shadow = JMP_REL32_NBYTES - 2; */
+/* 			for (i = 0, succbytes = 0; i < shadow && succbytes < shadow; i++) { */
+/* 				ud_disassemble(&ud); */
+/* 				dup_ud_inst(&ud,&succs[i]); */
+/* 				succbytes += succs[i].len; */
+/* 			} */
+/* 			assert(succbytes >= shadow); */
+/* 			new_syspatch(orig.pc,succbytes+2,i+1); */
+/* 			break; */
+
+/* 		default: */
+/* 			if (ud.mnemonic == UD_Inop) { */
+/* 				/\* leave fallthrough as it is, bump nop count *\/ */
+/* 				nopbytes += ud_insn_len(&ud); */
+/* 			} else { */
+/* 				/\* minimum nopbuf to be useful is 2 bytes non-fallthrough */
+/* 				   or four bytes fallthrough *\/ */
+/* 				if ((fallthrough && nopbytes >= 4) */
+/* 				    || (!fallthrough && nopbytes >= 2)) { */
+/* 					new_nopbuf((void*)ud.pc - ud_insn_len(&ud) - nopbytes, */
+/* 					           nopbytes,fallthrough); */
+/* 				} */
+/* 				fallthrough = (ud.mnemonic != UD_Iret */
+/* 				               && ud.mnemonic != UD_Ijmp); */
+/* 				nopbytes = 0; */
+/* 			} */
+/* 			break; */
+/* 		} */
+/* 	} */
+/* } */
+
 static void patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
 {
 	scanpass(buf,len);
-	patchpass(tm);
+	syspatchpass(tm);
 
-	if (syspatches) {
-		free(syspatches);
-		syspatches = NULL;
-		nsyspatches = 0;
+	if (syscalls) {
+		free(syscalls);
+		syscalls = NULL;
+		nsyscalls = 0;
 	}
+
+/* 	if (syspatches) { */
+/* 		free(syspatches); */
+/* 		syspatches = NULL; */
+/* 		nsyspatches = 0; */
+/* 	} */
 	if (nopbufs) {
 		free(nopbufs);
 		nopbufs = NULL;
