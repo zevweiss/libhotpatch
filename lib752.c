@@ -860,12 +860,48 @@ static void patch_jmpchain(void* syscall, struct scratchbuf* firstlink,
 	}
 }
 
+#define CLOBBER_SHADOW_BUFLEN 16
+
+/*
+ * Figures out which instructions after a syscall we can't
+ * scratchbuf-patch will have to be duplicated (and potentially
+ * translated) in its trampoline
+ */
+static void* find_clobber_succs(const struct inst* sc, struct inst* succs,
+                                int* nsuccs, int* succbytes)
+{
+	ud_t ud;
+	int shadow,i,bytes;
+
+	ud_init(&ud);
+	ud_set_input_buffer(&ud,sc->bytes,sc->len+CLOBBER_SHADOW_BUFLEN);
+	ud_set_syntax(&ud,UD_SYN_ATT);
+	ud_set_mode(&ud,64);
+	ud_set_pc(&ud,(uintptr_t)sc->pc);
+
+	ud_disassemble(&ud);
+	assert(ud_insn_len(&ud) == 2);
+	shadow = JMP_REL32_NBYTES - 2;
+	for (i = 0, bytes = 0; i < shadow && bytes < shadow; i++) {
+		ud_disassemble(&ud);
+		dup_ud_inst(&ud,&succs[i]);
+		bytes += succs[i].len;
+	}
+	assert(bytes >= shadow);
+
+	*nsuccs = i;
+	*succbytes = bytes;
+	return (void*)ud.pc;
+}
+
 static void syspatchpass(struct trampmap* tm)
 {
 	int i;
 	struct scratchbuf* scratchlink;
-	struct inst scinst;
+	struct inst scinst,succs[3];
+	int nsuccs,succbytes,int3len;
 	void* tfaddr;
+	void* retaddr;
 
 	for (i = 0; i < nsyscalls; i++) {
 		scinst = (struct inst) {
@@ -877,44 +913,18 @@ static void syspatchpass(struct trampmap* tm)
 		if (scratchlink) {
 			tfaddr = gentramp(&scinst,NULL,0,tm,syscalls[i]+2);
 			patch_jmpchain(syscalls[i],scratchlink,tfaddr,tm);
+		} else {
+			retaddr = find_clobber_succs(&scinst,succs,&nsuccs,&succbytes);
+			tfaddr = gentramp(&scinst,succs,nsuccs,tm,retaddr);
+			genjmprel32(syscalls[i],tfaddr);
+
+			int3len = succbytes + 2 - JMP_REL32_NBYTES;
+			memset(syscalls[i]+JMP_REL32_NBYTES,X86OP_INT3,int3len);
+			if (int3len > 2)
+				new_nopbuf(syscalls[i]+JMP_REL32_NBYTES,int3len,0);
 		}
 	}
 }
-
-/* static void syspatchpass(struct trampmap* tm) */
-/* { */
-/* 	int i,j; */
-/* 	ud_t ud; */
-/* 	struct syspatch* sp; */
-/* 	void* tfaddr; */
-/* 	struct inst orig, succs[3]; */
-/* 	unsigned int succbytes, shadow; */
-
-/* 	for (i = 0, sp = syspatches; i < nsyspatches; sp++, i++) { */
-/* 		ud_init(&ud); */
-/* 		ud_set_input_buffer(&ud,sp->start,sp->bytes); */
-/* 		ud_set_syntax(&ud,UD_SYN_ATT); */
-/* 		ud_set_mode(&ud,64); */
-/* 		ud_set_pc(&ud,(uint64_t)sp->start); */
-
-/* 		ud_disassemble(&ud); */
-/* 		assert(ud_insn_len(&ud) == 2); */
-/* 		dup_ud_inst(&ud,&orig); */
-/* 		shadow = JMP_REL32_NBYTES - 2; */
-/* 		for (j = 0, succbytes = 0; j < shadow && succbytes < shadow; j++) { */
-/* 			ud_disassemble(&ud); */
-/* 			dup_ud_inst(&ud,&succs[j]); */
-/* 			succbytes += succs[j].len; */
-/* 		} */
-/* 		assert(succbytes >= shadow); */
-
-/* 		tfaddr = gentramp(&orig,succs,j,tm,(void*)ud.pc); */
-/* 		gentrampjmp(orig.pc,tfaddr); */
-
-/* 		for (j = 0; j < succbytes + 2 - JMP_REL32_NBYTES; j++) */
-/* 			*(uint8_t*)(orig.pc+JMP_REL32_NBYTES+j) = X86OP_INT3; */
-/* 	} */
-/* } */
 
 /*
  * Finds and record usefully-sized nop buffers and locations of
