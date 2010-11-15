@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/mman.h>
@@ -80,36 +81,12 @@ static FILE* pllog;
 
 static struct rusage tot_self_rusage = ZERO_RUSAGE, tot_children_rusage = ZERO_RUSAGE;
 
-static void printargv(void)
-{
-	int c;
-	FILE* argfile;
-
-	argfile = fopen("/proc/self/cmdline","r");
-	assert(argfile);
-
-	fprintf(pllog,"%i: ",getpid());
-	while ((c =fgetc(argfile)) != EOF)
-		fputc(c ? c : ' ',pllog); /* args in /proc/pid/cmdline are NUL-delimited */
-	fputc('\n',pllog);
-
-	fflush(pllog);
-	fclose(argfile);
-}
-
 static void* memdup(void* orig, size_t len)
 {
 	void* new = malloc(len);
 	assert(new);
 	memcpy(new,orig,len);
 	return new;
-}
-
-static void rusage_hdr(void)
-{
-	fprintf(pllog,"%15s %12s %12s %10s %10s %8s %10s %10s\n","",
-	        "User CPU","System CPU","majflt", "minflt","Swaps",
-	        "VCSW","ICSW");
 }
 
 /* check if any of instruction's operands are RIP-relative memory operands */
@@ -1554,9 +1531,46 @@ static void scan_and_patch(void)
 	}
 }
 
+static void printargv(void)
+{
+	int c;
+	FILE* argfile;
+
+	argfile = fopen("/proc/self/cmdline","r");
+	assert(argfile);
+
+	fprintf(pllog,"%i: ",getpid());
+	while ((c =fgetc(argfile)) != EOF)
+		fputc(c ? c : ' ',pllog); /* args in /proc/pid/cmdline are NUL-delimited */
+	fputc('\n',pllog);
+
+	fflush(pllog);
+	fclose(argfile);
+}
+
+static void rusage_hdr(void)
+{
+	fprintf(pllog,"%15s %12s %12s %10s %10s %8s %10s %10s\n","",
+	        "User CPU","System CPU","majflt", "minflt","Swaps",
+	        "VCSW","ICSW");
+}
+
+#define SEPSTR \
+"================================================================================"
+
+static void print_loghdr(void)
+{
+	time_t t;
+	time(&t);
+	fprintf(pllog,SEPSTR"\n%s\n",ctime(&t));
+	printargv();
+	rusage_hdr();
+}
+
 static void lib752_init(void)
 {
 	sighandler_t ret;
+	const char* hotpatch;
 
 	ret = signal(SIGUSR1,usr_handler);
 	assert(ret != SIG_ERR);
@@ -1565,12 +1579,13 @@ static void lib752_init(void)
 
 	pllog = fopen("./log","a");
 	assert(pllog);
-	printargv();
+	print_loghdr();
 
-	read_maps();
-	scan_and_patch();
-
-	rusage_hdr();
+	hotpatch = getenv("LIB752_HOTPATCH");
+	if (hotpatch && strlen(hotpatch) > 0) {
+		read_maps();
+		scan_and_patch();
+	}
 
 //	unsetenv("LD_PRELOAD");
 }
@@ -1673,6 +1688,7 @@ static void lib752_fini(void)
 {
 	signal(SIGUSR1,SIG_DFL);
 
+	fprintf(pllog,"Totals:\n");
 	showstats(1);
 	fclose(pllog);
 }
