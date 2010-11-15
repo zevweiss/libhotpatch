@@ -1569,15 +1569,16 @@ static void rusage_hdr(void)
 	        "VCSW","ICSW");
 }
 
-#define SEPSTR \
-"================================================================================"
+#define HALFSEP "========================================"
+#define FULLSEP HALFSEP HALFSEP
 
 static void print_loghdr(void)
 {
 	time_t t;
 	time(&t);
-	fprintf(pllog,SEPSTR"\n%s\n",ctime(&t));
+	fprintf(pllog,FULLSEP"\n%s",ctime(&t));
 	printargv();
+	fputc('\n',pllog);
 	rusage_hdr();
 }
 
@@ -1585,13 +1586,18 @@ static void lib752_init(void)
 {
 	sighandler_t ret;
 	const char* hotpatch;
+	const char* logpath;
 
 	ret = signal(SIGUSR1,usr_handler);
 	assert(ret != SIG_ERR);
 	ret = signal(SIGUSR2,usr_handler);
 	assert(ret != SIG_ERR);
 
-	pllog = fopen("./log","a");
+	logpath = getenv("LIB752_LOGPATH");
+	if (!logpath || !strlen(logpath))
+		logpath = "./lib752_log";
+
+	pllog = fopen(logpath,"a");
 	assert(pllog);
 	print_loghdr();
 
@@ -1600,8 +1606,6 @@ static void lib752_init(void)
 		read_maps();
 		scan_and_patch();
 	}
-
-//	unsetenv("LD_PRELOAD");
 }
 
 static void printrusage(struct rusage* r, const char* pfx)
