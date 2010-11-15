@@ -1564,19 +1564,13 @@ static void printargv(void)
 
 static void rusage_hdr(void)
 {
-	fprintf(pllog,"%15s %12s %12s %10s %10s %8s %10s %10s\n","",
+	fprintf(pllog,"%6s %12s %12s %7s %9s %6s %8s %8s\n","",
 	        "User CPU","System CPU","majflt", "minflt","Swaps",
 	        "VCSW","ICSW");
 }
 
-#define HALFSEP "========================================"
-#define FULLSEP HALFSEP HALFSEP
-
 static void print_loghdr(void)
 {
-	time_t t;
-	time(&t);
-	fprintf(pllog,FULLSEP"\n%s",ctime(&t));
 	printargv();
 	fputc('\n',pllog);
 	rusage_hdr();
@@ -1610,11 +1604,11 @@ static void lib752_init(void)
 
 static void printrusage(struct rusage* r, const char* pfx)
 {
-	fprintf(pllog,"%-15s %5li.%06li %5li.%06li",pfx,
+	fprintf(pllog,"%-6s %5li.%06li %5li.%06li",pfx,
 	        r->ru_utime.tv_sec,r->ru_utime.tv_usec,
 	        r->ru_stime.tv_sec,r->ru_stime.tv_usec);
 
-	fprintf(pllog," %10li %10li %8li %10li %10li\n",
+	fprintf(pllog," %7li %9li %6li %8li %8li\n",
 	        r->ru_majflt,r->ru_minflt,r->ru_nswap,r->ru_nvcsw,r->ru_nivcsw);
 
 	fflush(pllog);
@@ -1692,7 +1686,7 @@ static void showstats(int abs)
 	    || cprint->ru_stime.tv_sec || cprint->ru_stime.tv_usec
             || cprint->ru_majflt || cprint->ru_nswap
 	    || cprint->ru_nvcsw || cprint->ru_nivcsw) {
-		snprintf(pfxbuf,sizeof(pfxbuf),"%i-children",getpid());
+		snprintf(pfxbuf,sizeof(pfxbuf),"%i>",getpid());
 		printrusage(cprint,pfxbuf);
 	}
 }
@@ -1704,9 +1698,13 @@ static void usr_handler(int signo)
 
 static void lib752_fini(void)
 {
+	const char* envtot;
 	signal(SIGUSR1,SIG_DFL);
 
-	fprintf(pllog,"Totals:\n");
-	showstats(1);
+	envtot = getenv("LIB752_PRINT_TOTALS");
+	if (envtot && strlen(envtot)) {
+		fprintf(pllog,"Totals:\n");
+		showstats(1);
+	}
 	fclose(pllog);
 }
