@@ -578,20 +578,16 @@ static int bufsearch_compar(const void* startpt, const void* scratchbuf)
 {
 	const struct scratchbuf* buf = scratchbuf;
 	const void* dst = scratchbuf_dest(buf);
-	if (buf->len < 2
-	    || (buf->len < 4 && buf->fallthrough)
-	    || !within_rel8(startpt,dst)) {
+
+	if (!within_rel8(startpt,dst)) {
 		if (startpt < dst)
 			return -1;
 		else if (startpt > dst)
 			return 1;
 		else
 			abort();
-	}
-
-	/* if we get here, we know it's within range and large enough
-	 * to be useful */
-	return 0;
+	} else
+		return 0;
 }
 
 /* For use with qsort when we add nopbufs post-scanpass */
@@ -680,73 +676,83 @@ static struct scratchbuf* find_scratchpath(void* startpt)
 	if (!firstfound)
 		return NULL;
 
-	iter = firststep = firstfound;
-
 	/* first try to go forward */
-	for (;;) {
-		next = next_scratchbuf(iter);
-		/* if we've reached a usable one, cool */
-		if (scratchbuf_fits_jmprel32(iter)) {
-			if (within_rel8(startpt,scratchbuf_dest(iter)))
-				return iter;
-			if (((iter->start < firststep->start)
-			     && (firststep->start < startpt))
-			    || ((iter->start > firststep->start)
-			        && (firststep->start > startpt)))
-				return firststep;
-			/* I think that should cover it? If not, blow up. */
-			abort();
+	iter = firstfound;
+	/* skipping over any unusable ones */
+	while (!scratchbuf_usable(iter))
+		iter = next_scratchbuf(iter);
+	if (within_rel8(startpt,scratchbuf_dest(iter))) {
+		firststep = iter;
+		for (;;) {
+			next = next_scratchbuf(iter);
+			/* if we've reached a usable one, cool */
+			if (scratchbuf_fits_jmprel32(iter)) {
+				if (within_rel8(startpt,scratchbuf_dest(iter)))
+					return iter;
+				if (((iter->start < firststep->start)
+				     && (firststep->start < startpt))
+				    || ((iter->start > firststep->start)
+				        && (firststep->start > startpt)))
+					return firststep;
+				/* I think that should cover it? If not, blow up. */
+				abort();
+			}
+
+			/* give up if we've reached the end of the scratchbuf
+			 * array or we can't reach the next one */
+			if (!next
+			    || (!can_link(iter,next)
+			        && !within_rel8(startpt,scratchbuf_dest(next))))
+				break;
+
+			/* otherwise we'll move on to the next one, but first
+			 * check if we're about to cross startpt -- if so,
+			 * adjust firststep accordingly */
+			if (next->start > startpt && iter->start < startpt)
+				firststep = next;
+
+			iter = next;
 		}
-
-		/* give up if we've reached the end of the scratchbuf
-		 * array or we can't reach the next one */
-		if (!next
-		    || (!can_link(iter,next)
-		        && !within_rel8(startpt,scratchbuf_dest(next))))
-			break;
-
-		/* otherwise we'll move on to the next one, but first
-		 * check if we're about to cross startpt -- if so,
-		 * adjust firststep accordingly */
-		if (next->start > startpt && iter->start < startpt)
-			firststep = next;
-
-		iter = next;
 	}
 
 	/* if we get here, we didn't find anything going forward.  reinitialize. */
-	iter = firststep = firstfound;
+	iter = firstfound;
+	/* again, skipping over unused ones */
+	while (!scratchbuf_usable(iter))
+		iter = prev_scratchbuf(iter);
+	if (within_rel8(startpt,scratchbuf_dest(iter))) {
+		firststep = iter;
+		/* similar to above, but searching backward */
+		for (;;) {
+			next = prev_scratchbuf(iter);
+			/* if we've reach a usable one, cool */
+			if (scratchbuf_fits_jmprel32(iter)) {
+				if (within_rel8(startpt,scratchbuf_dest(iter)))
+					return iter;
+				if (((iter->start < firststep->start)
+				     && (firststep->start < startpt))
+				    || ((iter->start > firststep->start)
+				        && (firststep->start > startpt)))
+					return firststep;
+				/* I think that should cover it?  If not, blow up. */
+				abort();
+			}
 
-	/* similar to above, but searching backward */
-	for (;;) {
-		next = prev_scratchbuf(iter);
-		/* if we've reach a usable one, cool */
-		if (scratchbuf_fits_jmprel32(iter)) {
-			if (within_rel8(startpt,scratchbuf_dest(iter)))
-				return iter;
-			if (((iter->start < firststep->start)
-			     && (firststep->start < startpt))
-			    || ((iter->start > firststep->start)
-			        && (firststep->start > startpt)))
-				return firststep;
-			/* I think that should cover it?  If not, blow up. */
-			abort();
+			/* give up if we've reach the end of the scratchbuf
+			 * array or we can't reach the next one. */
+			if (!next
+			    || (!can_link(iter,next)
+			        && !within_rel8(startpt,scratchbuf_dest(next))))
+				break;
+
+			/* otherwise we'll move on to the next one, but first
+			 * check to see if we're about to cross startpt -- if
+			 * so, adjust firststep accordingly */
+			if (next->start < startpt && iter->start > startpt)
+				firststep = next;
+
+			iter = next;
 		}
-
-		/* give up if we've reach the end of the scratchbuf
-		 * array or we can't reach the next one. */
-		if (!next
-		    || (!can_link(iter,next)
-		        && !within_rel8(startpt,scratchbuf_dest(next))))
-			break;
-
-		/* otherwise we'll move on to the next one, but first
-		 * check to see if we're about to cross startpt -- if
-		 * so, adjust firststep accordingly */
-		if (next->start < startpt && iter->start > startpt)
-			firststep = next;
-
-		iter = next;
 	}
 
 	/* if we get here, couldn't find anything */
@@ -771,37 +777,31 @@ static void genjmprel32(void* org, void* dst)
 	*(int32_t*)(org+1) = (int32_t)ofst;
 }
 
-static void patch_jmpchain(void* syscall, struct scratchbuf* firstlink,
-                           void* dest, struct trampmap* tm)
+static void patch_jmpchain(void* origin, struct scratchbuf* firstlink, void* dest)
 {
 	ud_t ud;
-	uint8_t sci_bytes[2];
+	uint8_t orig_bytes[16];
 	void* org;
 	struct scratchbuf* link;
 	struct scratchbuf* prevlink;
 	struct scratchbuf* (*nextbuf)(struct scratchbuf*);
-	struct inst scinst = {
-		.bytes = sci_bytes,
-		.len = 2,
-		.pc = syscall,
+	struct inst originst = {
+		.bytes = orig_bytes,
+		.len = sizeof(orig_bytes),
+		.pc = origin,
 	};
 
-	memcpy(sci_bytes,syscall,sizeof(sci_bytes));
-	inst_to_ud(&scinst,&ud);
+	memcpy(orig_bytes,origin,sizeof(orig_bytes));
+	inst_to_ud(&originst,&ud);
 
-	assert(ud.mnemonic == UD_Isyscall
-	       || ud.mnemonic == UD_Isysenter
-	       || (ud.mnemonic == UD_Iint
-	           && ud.operand[0].lval.ubyte == 0x80));
-
-	if (firstlink->start > syscall)
+	if (firstlink->start > origin)
 		nextbuf = next_scratchbuf;
 	else
 		nextbuf = prev_scratchbuf;
 
 	prevlink = NULL;
 	link = firstlink;
-	org = syscall;
+	org = origin;
 	for (;;) {
 		/* check if we can use this as the final link */
 		if (link->len >= JMP_REL32_NBYTES + JMP_REL8_NBYTES
@@ -936,6 +936,13 @@ static void* get_jmptarg(ud_t* ud)
 	return (void*)ud->pc + ofst;
 }
 
+static void invasive_jmppatch(void* origin, void* dest)
+{
+	int nsuccs;
+	struct inst succs[JMP_REL32_NBYTES];
+	/* TODO: write this method */
+}
+
 static void check_jump(ud_t* ud)
 {
 	void* targ;
@@ -944,6 +951,7 @@ static void check_jump(ud_t* ud)
 	void* instaddr;
 	struct clobberpatch* collision;
 	struct inst trampjmp_inst;
+	struct scratchbuf* scratchlink;
 	ud_t trampjmp;
 	int64_t disp;
 
@@ -988,7 +996,13 @@ static void check_jump(ud_t* ud)
 		*(int32_t*)(instaddr+get_jmpdisp_ofst(ud)) = disp;
 	} else {
 		/* things get uglier. */
-//		BREAK();
+		scratchlink = find_scratchpath(instaddr);
+		if (scratchlink) {
+			patch_jmpchain(instaddr,scratchlink,newtarg);
+		} else {
+			invasive_jmppatch(instaddr,newtarg);
+			BREAK();
+		}
 	}
 }
 
@@ -1039,21 +1053,21 @@ static void jmpchkpass(void* buf, size_t len)
  * scratchbuf-patch will have to be duplicated (and potentially
  * translated) in its trampoline
  */
-static void* find_clobber_succs(const struct inst* sc, struct inst* succs,
+static void* find_clobber_succs(const struct inst* victim, struct inst* succs,
                                 int* nsuccs, int* succbytes)
 {
 	ud_t ud;
 	int shadow,i,bytes;
 
 	ud_init(&ud);
-	ud_set_input_buffer(&ud,sc->bytes,sc->len+CLOBBER_SHADOW_BUFLEN);
+	ud_set_input_buffer(&ud,victim->bytes,victim->len+CLOBBER_SHADOW_BUFLEN);
 	ud_set_syntax(&ud,UD_SYN_ATT);
 	ud_set_mode(&ud,64);
-	ud_set_pc(&ud,(uintptr_t)sc->pc);
+	ud_set_pc(&ud,(uintptr_t)victim->pc);
 
 	ud_disassemble(&ud);
-	assert(ud_insn_len(&ud) == 2);
-	shadow = JMP_REL32_NBYTES - 2;
+	assert(ud_insn_len(&ud) < JMP_REL32_NBYTES);
+	shadow = JMP_REL32_NBYTES - ud_insn_len(&ud);
 	for (i = 0, bytes = 0; i < shadow && bytes < shadow; i++) {
 		ud_disassemble(&ud);
 		dup_ud_inst(&ud,&succs[i]);
@@ -1084,7 +1098,7 @@ static void syspatchpass(struct trampmap* tm)
 		scratchlink = find_scratchpath(syscalls[i]);
 		if (scratchlink) {
 			tfaddr = gentramp(&scinst,NULL,0,tm,syscalls[i]+2);
-			patch_jmpchain(syscalls[i],scratchlink,tfaddr,tm);
+			patch_jmpchain(syscalls[i],scratchlink,tfaddr);
 		} else {
 			retaddr = find_clobber_succs(&scinst,succs,&nsuccs,&succbytes);
 			tfaddr = gentramp(&scinst,succs,nsuccs,tm,retaddr);
