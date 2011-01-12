@@ -12,14 +12,14 @@ LDDLIBS = $(addprefix -l,$(DLIBS))
 
 LDFLAGS = -shared -Wl,-Bstatic $(LDSLIBS) -Wl,-Bdynamic $(LDDLIBS)
 
-default: lib752.so
+default: libhotpatch.so
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-lib752.so: lib752.o
+libhotpatch.so: libhotpatch.o
 	$(CC) $(CFLAGS) -Wl,-soname,$@ -o $@ $^ $(LDFLAGS)
 
 .PHONY: clean
 clean:
-	rm -f *.o lib752.so
+	rm -f *.o libhotpatch.so
