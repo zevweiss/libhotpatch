@@ -21,8 +21,8 @@
 
 #include <udis86.h>
 
-static void lib752_init(void) __attribute__((constructor));
-static void lib752_fini(void) __attribute__((destructor));
+static void libhotpatch_init(void) __attribute__((constructor));
+static void libhotpatch_fini(void) __attribute__((destructor));
 
 static void usr_handler(int signo);
 
@@ -1505,7 +1505,7 @@ static void scan_and_patch(void)
 
 			/* don't scan/patch our own code */
 			if ((basename = strrchr(m->path,'/'))
-			    && (!strcmp(basename+1,"lib752.so")
+			    && (!strcmp(basename+1,"libhotpatch.so")
 			        || !strncmp(basename+1,"libelf.so",
 			                    strlen("libelf.so"))))
 				continue;
@@ -1576,7 +1576,7 @@ static void print_loghdr(void)
 	rusage_hdr();
 }
 
-static void lib752_init(void)
+static void libhotpatch_init(void)
 {
 	sighandler_t ret;
 	const char* hotpatch;
@@ -1587,15 +1587,15 @@ static void lib752_init(void)
 	ret = signal(SIGUSR2,usr_handler);
 	assert(ret != SIG_ERR);
 
-	logpath = getenv("LIB752_LOGPATH");
+	logpath = getenv("LIBHOTPATCH_LOGPATH");
 	if (!logpath || !strlen(logpath))
-		logpath = "./lib752_log";
+		logpath = "./libhotpatch_log";
 
 	pllog = fopen(logpath,"a");
 	assert(pllog);
 	print_loghdr();
 
-	hotpatch = getenv("LIB752_HOTPATCH");
+	hotpatch = getenv("LIBHOTPATCH_ENABLE");
 	if (hotpatch && strlen(hotpatch) > 0) {
 		read_maps();
 		scan_and_patch();
@@ -1696,12 +1696,12 @@ static void usr_handler(int signo)
 	showstats(signo == SIGUSR1);
 }
 
-static void lib752_fini(void)
+static void libhotpatch_fini(void)
 {
 	const char* envtot;
 	signal(SIGUSR1,SIG_DFL);
 
-	envtot = getenv("LIB752_PRINT_TOTALS");
+	envtot = getenv("LIBHOTPATCH_PRINT_TOTALS");
 	if (envtot && strlen(envtot)) {
 		fprintf(pllog,"Totals:\n");
 		showstats(1);
