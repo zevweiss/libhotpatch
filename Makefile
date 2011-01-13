@@ -4,13 +4,14 @@ CDEBUG = -ggdb3
 COPT = -O0
 CFLAGS = $(CWARN) $(CDEBUG) $(COPT) -fPIC
 
-SLIBS = udis86
 DLIBS = dl elf
 
-LDSLIBS = $(addprefix -l,$(SLIBS))
+# TODO: build libudis86 automatically...preferably without redoing the
+# whole autogen/configure/make process every time.
+LIBUDIS86 = udis86/install/lib/libudis86.a
 LDDLIBS = $(addprefix -l,$(DLIBS))
 
-LDFLAGS = -shared -Wl,-Bstatic $(LDSLIBS) -Wl,-Bdynamic $(LDDLIBS)
+LDFLAGS = -shared -Wl,-Bstatic $(LIBUDIS86) -Wl,-Bdynamic $(LDDLIBS)
 
 default: libhotpatch.so
 
