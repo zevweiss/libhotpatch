@@ -5,29 +5,28 @@ Zev Weiss <zevweiss@gmail.com>
 libhotpatch implements hot-patching (as its name implies) of code at
 program load time.  It is a shared library intended for use via
 LD_PRELOAD (actually linking against it won't do you much good).
-Currently it patches 'syscall' instructions, replacing them with
+Currently it patches `syscall` instructions, replacing them with
 branches to dynamically-generated trampolines from which the
 instruction is actually executed, and which then branch back to the
 patch-point.
 
 
-How it Works
-------------
+== How it Works
 
 Its mechanism of achieving this is a bit...unusual, I suppose.  It
 exploits (and depends on) gcc's tendency to create binaries with
 little pads of no-ops scattered throughout them (a result of gcc's
--falign-* flags).  Since a syscall instruction is only two bytes and
+-falign-* flags).  Since a `syscall` instruction is only two bytes and
 we need a 5-byte branch to reach the trampolines, it attempts to
 string together sequences of two-bytes jumps until it reaches a no-op
-pad large enough to accommodate a 5-byte jmp, threading a chain of
+pad large enough to accommodate a 5-byte `jmp`, threading a chain of
 "stepping stones" through the spaces left by the compiler.  Early
 results indicate (somewhat surprisingly, to me) that this actually
 works most of the time, allowing most patching to be done in a
-minimally-invasive manner.  
+minimally-invasive manner.
 
 For the cases where it can't quite pull this off, a "clobber-patch" is
-used: it simply write a 5-byte instruction over a 2-byte one, and
+used: it simply writes a 5-byte instruction over a 2-byte one, and
 relocates the clobbered instructions into the trampoline, translating
 them as necessary if they are position-dependent.  This also
 introduces further complications if the clobbered any clobbered
@@ -36,8 +35,7 @@ that branch must then be retargeted to point to the relocated
 instruction.
 
 
-Plans for future development
-----------------------------
+== Plans for future development
 
 - Inserting a call to a user-supplied tracing function in each
   trampoline (this was in fact the original intent, I just haven't
@@ -49,20 +47,22 @@ Plans for future development
 Hopefully I'll remember to update this as it progresses.
 
 
-Support
--------
+== Support
 
 libhotpatch supports ("supports" may be too strong a word) only x86-64
 code on Linux.
 
 
-Acknowledgments
-----------------
+== Acknowledgments
 
 It uses Vivek Thampi's udis86 library for disassembly.
 
 
-License
--------
+== Author
+
+Zev Weiss
+
+
+== License
 
 libhotpatch is released under the terms of the GPL, version 2.
