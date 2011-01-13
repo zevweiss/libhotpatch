@@ -1,3 +1,9 @@
+/*
+ * (C) Zev Weiss 2011
+ *
+ * libhotpatch is licensed under the GPLv2.
+ */
+
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
