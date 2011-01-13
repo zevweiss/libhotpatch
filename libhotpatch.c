@@ -19,7 +19,7 @@
 #include <libelf.h>
 #include <gelf.h>
 
-#include <udis86.h>
+#include "udis86/install/include/udis86.h"
 
 static void libhotpatch_init(void) __attribute__((constructor));
 static void libhotpatch_fini(void) __attribute__((destructor));
@@ -888,7 +888,8 @@ static void invasive_jmppatch(void* origin, void* dest)
 	int nsuccs;
 	struct inst succs[JMP_REL32_NBYTES];
 	/* TODO: write this function */
-	BREAK();
+	fprintf(pllog,"warning: invasive_jmppatch NYI...\n");
+//	BREAK();
 }
 
 static void check_jump(ud_t* ud)
