@@ -830,7 +830,7 @@ static uint8_t get_jmpdisp_ofst(ud_t* ud)
 	switch (ud->mnemonic) {
 	case UD_Ijmp:
 		if (ud->operand[0].size == 8) {
-			BREAK();
+			BREAK(); /* FIXME: why is this here? */
 			return 1;
 		} else {
 			return 1;
@@ -855,7 +855,7 @@ static uint8_t get_jmpdisp_ofst(ud_t* ud)
 	case UD_Ijecxz:
 	case UD_Ijrcxz:
 		if (ud->operand[0].size == 8) {
-			BREAK();
+			BREAK(); /* FIXME: why is this here? */
 			return 2;
 		} else {
 			return 2;
@@ -887,7 +887,8 @@ static void invasive_jmppatch(void* origin, void* dest)
 {
 	int nsuccs;
 	struct inst succs[JMP_REL32_NBYTES];
-	/* TODO: write this method */
+	/* TODO: write this function */
+	BREAK();
 }
 
 static void check_jump(ud_t* ud)
@@ -914,7 +915,6 @@ static void check_jump(ud_t* ud)
 		break;
 
 	default:
-		BREAK();
 		abort();
 	}
 
@@ -948,7 +948,6 @@ static void check_jump(ud_t* ud)
 			patch_jmpchain(instaddr,scratchlink,newtarg);
 		} else {
 			invasive_jmppatch(instaddr,newtarg);
-			BREAK();
 		}
 	}
 }
@@ -1096,9 +1095,8 @@ static void scanpass(void* buf, size_t len)
 				new_nopbuf((void*)ud.pc - ud_insn_len(&ud) - nopbytes,
 				           nopbytes,fallthrough);
 			}
-			/* We're operating on the assumption that a
-			 * jmp/call won't be pointed at a nop in the
-			 * next few bytes */
+			/* ASSUMPTION: a jmp/call won't be pointed at
+			 * a nop in the next few bytes */
 			fallthrough = (ud.mnemonic != UD_Iret
 			               && ud.mnemonic != UD_Ijmp);
 			nopbytes = 0;
@@ -1521,9 +1519,9 @@ static void libhotpatch_init(void)
 
 	logpath = getenv("LIBHOTPATCH_LOGPATH");
 	if (!logpath || !strlen(logpath))
-		logpath = "./libhotpatch_log";
+		logpath = "./hplog";
 
-	pllog = fopen(logpath,"a");
+	pllog = fopen(logpath,"w");
 	assert(pllog);
 	print_loghdr();
 
