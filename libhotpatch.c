@@ -1072,8 +1072,8 @@ static void syspatchpass(struct trampmap* tm)
 static void scanpass(void* buf, size_t len)
 {
 	ud_t ud;
-	unsigned int nopbytes;
-	int fallthrough,holdoff = 0;
+	unsigned int nopbytes = 0;
+	int fallthrough = 1,holdoff = 0;
 
 	ud_init(&ud);
 	ud_set_input_buffer(&ud,buf,len);
