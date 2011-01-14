@@ -65,7 +65,8 @@ It uses Vivek Thampi's udis86 library for x86-64 disassembly.
 
 == Build
 
-First build libudis86: `cd` to the `udis86` directory and configure with:
+First build libudis86: `cd` to the `udis86` directory, run
+`./autogen.sh` and configure with:
 
 ----
 ./configure --prefix=$PWD/install/ --disable-shared CFLAGS='-fPIC -fvisibility=hidden'
