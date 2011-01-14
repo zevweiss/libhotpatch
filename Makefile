@@ -2,7 +2,7 @@ CC = gcc
 CWARN = -Wall
 CDEBUG = -ggdb3
 COPT = -O0
-CFLAGS = $(CWARN) $(CDEBUG) $(COPT) -fPIC
+CFLAGS = $(CWARN) $(CDEBUG) $(COPT) -fPIC -fvisibility=hidden
 
 DLIBS = dl elf
 
