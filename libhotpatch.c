@@ -121,13 +121,23 @@ struct inst {
 	uint8_t len;
 };
 
-static void inst_to_ud(const struct inst* inst, ud_t* ud)
+static void init_udinst_pc(ud_t* ud, void* start, size_t len, uintptr_t pc)
 {
 	ud_init(ud);
-	ud_set_input_buffer(ud,inst->bytes,inst->len);
+	ud_set_input_buffer(ud,start,len);
 	ud_set_mode(ud,64);
 	ud_set_syntax(ud,UD_SYN_ATT);
-	ud_set_pc(ud,(uintptr_t)inst->pc);
+	ud_set_pc(ud,pc);
+}
+
+static void init_udinst(ud_t* ud, void* start, size_t len)
+{
+	init_udinst_pc(ud,start,len,(uintptr_t)start);
+}
+
+static void inst_to_ud(const struct inst* inst, ud_t* ud)
+{
+	init_udinst_pc(ud,inst->bytes,inst->len,(uintptr_t)inst->pc);
 	ud_disassemble(ud);
 }
 
@@ -963,11 +973,7 @@ static void jmpchkpass(void* buf, size_t len)
 {
 	ud_t ud;
 
-	ud_init(&ud);
-	ud_set_input_buffer(&ud,buf,len);
-	ud_set_syntax(&ud,UD_SYN_ATT);
-	ud_set_mode(&ud,64);
-	ud_set_pc(&ud,(uintptr_t)buf);
+	init_udinst(&ud,buf,len);
 
 	while (ud_disassemble(&ud)) {
 		switch (ud.mnemonic) {
@@ -1081,11 +1087,7 @@ static void scanpass(void* buf, size_t len)
 	unsigned int nopbytes = 0;
 	int fallthrough = 1,holdoff = 0;
 
-	ud_init(&ud);
-	ud_set_input_buffer(&ud,buf,len);
-	ud_set_syntax(&ud,UD_SYN_ATT);
-	ud_set_mode(&ud,64);
-	ud_set_pc(&ud,(uint64_t)buf);
+	init_udinst(&ud,buf,len);
 
 	while (ud_disassemble(&ud)) {
 		switch (ud.mnemonic) {
