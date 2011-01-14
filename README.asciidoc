@@ -13,7 +13,7 @@ patch-point.
 
 == How it Works
 
-Its mechanism of achieving this is a bit...unusual, I suppose.  It
+Its mechanism for achieving this is a bit...unusual, I suppose.  It
 exploits (and depends on) gcc's tendency to create binaries with
 little pads of no-ops scattered throughout them (a result of gcc's
 -falign-* flags).  Since a `syscall` instruction is only two bytes and
@@ -44,6 +44,11 @@ instruction.
 - Allow a user-supplied predicate function to determine which
   instructions to patch.
 
+- Implement lazy patching: at initialization, just mark code sections
+  no-execute; then catch the SIGSEGV when execution hits them, patch
+  that page, and re-enable execution on it.  I think this may be
+  slightly more complicated than it would appear at first glance.
+
 Hopefully I'll remember to update this as it progresses.
 
 
@@ -55,7 +60,20 @@ code on Linux.
 
 == Acknowledgments
 
-It uses Vivek Thampi's udis86 library for disassembly.
+It uses Vivek Thampi's udis86 library for x86-64 disassembly.
+
+
+== Build
+
+First build libudis86: `cd` to the `udis86` directory and configure with:
+
+----
+./configure --prefix=$PWD/install/ --disable-shared CFLAGS='-fPIC -fvisibility=hidden'
+----
+
+Then build libudis86 with `make && make install`.
+
+Finally, just run `make` in the top-level directory.
 
 
 == Author
