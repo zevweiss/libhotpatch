@@ -199,6 +199,7 @@ static unsigned int ntrampmaps = 0;
 #define JMP_REL8_NBYTES 2
 #define JCC_REL32_NBYTES 6
 #define JCC_REL8_NBYTES 2
+#define SYSCALL_NBYTES 2
 
 /* generate a jmp-rel8 at org to dst */
 static void genjmprel8(void* org, const void* dst)
@@ -1084,6 +1085,8 @@ static void check_jump(ud_t* ud, struct trampmap* tm)
 		abort();
 	}
 
+	/* this is very inefficient (doing a fresh search for every
+	 * jump) */
 	collision = bsearch(targ,clobberpatches,nclobberpatches,sizeof(*clobberpatches),
 	                    jmpcheck_clobberpatch_bscmp);
 	if (!collision)
@@ -1166,12 +1169,13 @@ static void syspatchpass(struct trampmap* tm)
 	for (i = 0; i < nsyscalls; i++) {
 		scinst = (struct inst) {
 			.bytes = syscalls[i],
-			.len = 2,
+			.len = SYSCALL_NBYTES,
 			.pc = syscalls[i],
 		};
 		scratchlink = find_scratchpath(syscalls[i]);
 		if (scratchlink) {
-			tfaddr = gentramp(&scinst,NULL,0,tm,syscalls[i]+2);
+			tfaddr = gentramp(&scinst,NULL,0,tm,
+			                  syscalls[i]+JMP_REL8_NBYTES);
 			patch_jmpchain(syscalls[i],scratchlink,tfaddr);
 		} else {
 			retaddr = find_clobber_succs(syscalls[i],JMP_REL32_NBYTES,
@@ -1179,9 +1183,9 @@ static void syspatchpass(struct trampmap* tm)
 			tfaddr = gentramp(&scinst,succs,nsuccs,tm,retaddr);
 			genjmprel32(syscalls[i],tfaddr);
 
-			new_clobberpatch(syscalls[i],succbytes+2);
+			new_clobberpatch(syscalls[i],succbytes+SYSCALL_NBYTES);
 
-			int3len = succbytes + 2 - JMP_REL32_NBYTES;
+			int3len = succbytes + SYSCALL_NBYTES - JMP_REL32_NBYTES;
 			memset(syscalls[i]+JMP_REL32_NBYTES,X86OP_INT3,int3len);
 
 			/* if the int3 hole is big enough to be potentially
@@ -1218,8 +1222,12 @@ static void scanpass(void* buf, size_t len)
 			break;
 
 		default:
-			if ((fallthrough && nopbytes >= 4)
-			    || (!fallthrough && nopbytes >= 2)) {
+			/* if we could fallthrough into the nopbuf,
+			 * we'll need space for *two* jmp_rel8s (one
+			 * to the next link, and one at the top to
+			 * skip over our modifications); */
+			if ((fallthrough && nopbytes >= 2*JMP_REL8_NBYTES)
+			    || (!fallthrough && nopbytes >= JMP_REL8_NBYTES)) {
 				new_nopbuf((void*)ud.pc - ud_insn_len(&ud) - nopbytes,
 				           nopbytes,fallthrough);
 			}
