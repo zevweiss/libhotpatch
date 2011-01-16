@@ -1007,7 +1007,7 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 	void* tfaddr;
 	uint8_t* iptr;
 	ud_t srcud;
-	size_t added;
+	size_t added,int3len;
 
 	init_udinst(&srcud,origin,X86_MAX_INST_LEN);
 	ud_disassemble(&srcud);
@@ -1023,6 +1023,10 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 
 	/* jump to the trampoline area */
 	genjmprel32(origin,tfaddr);
+
+	/* fill with int3s to next instruction */
+	int3len = succbytes + srcinst.len - JMP_REL32_NBYTES;
+	memset(origin+JMP_REL32_NBYTES,X86OP_INT3,int3len);
 
 	/* move the original instruction to the trampoline */
 	if (tm->used + srcinst.len > tm->size) {
@@ -1179,7 +1183,10 @@ static void syspatchpass(struct trampmap* tm)
 
 			int3len = succbytes + 2 - JMP_REL32_NBYTES;
 			memset(syscalls[i]+JMP_REL32_NBYTES,X86OP_INT3,int3len);
-			if (int3len > 2)
+
+			/* if the int3 hole is big enough to be potentially
+			 * useful in the future, keep track of it. */
+			if (int3len > JMP_REL8_NBYTES)
 				new_nopbuf(syscalls[i]+JMP_REL32_NBYTES,int3len,0);
 		}
 	}
