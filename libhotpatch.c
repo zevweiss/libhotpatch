@@ -196,8 +196,23 @@ static unsigned int ntrampmaps = 0;
 #define JCC_REL32_NBYTES 6
 #define JCC_REL8_NBYTES 2
 
-#define X86_REX_W 0x48
-#define X86_REX_WR 0x4c
+/* generate a jmp-rel8 at org to dst */
+static void genjmprel8(void* org, const void* dst)
+{
+	int64_t ofst = dst - (org+JMP_REL8_NBYTES);
+	assert(ofst <= INT8_MAX && ofst >= INT8_MIN);
+	*(uint8_t*)org = X86OP_JMP_REL8;
+	*(int8_t*)(org+1) = (int8_t)ofst;
+}
+
+/* generate a jmp-rel32 at org to dst */
+static void genjmprel32(void* org, const void* dst)
+{
+	int64_t ofst = dst - (org+JMP_REL32_NBYTES);
+	assert(ofst <= INT32_MAX && ofst >= INT32_MIN);
+	*(uint8_t*)org = X86OP_JMP_REL32;
+	*(int32_t*)(org+1) = (int32_t)ofst;
+}
 
 /*
  * "Translate" an instruction for relocation from orig->pc to new->pc
@@ -397,7 +412,6 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 	void* funcaddr;
 	int i;
 	struct inst trans;
-	int64_t retofst;
 
 	funcaddr = iptr = tm->base + tm->used;
 
@@ -422,18 +436,9 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 		tm->used += trans.len;
 	}
 
-	retofst = (int64_t)retaddr - ((int64_t)iptr + JMP_REL32_NBYTES);
-	if (retofst > INT32_MAX || retofst < INT32_MIN) {
-		fprintf(pllog,"return branch beyond rel32 range\n");
-		abort();
-	}
-
-	/* and generate the return jmp */
-	*iptr++ = X86OP_JMP_REL32;
-	tm->used++;
-	*(int32_t*)iptr = (int32_t)retofst;
-	iptr += sizeof(int32_t);
-	tm->used += sizeof(int32_t);
+	genjmprel32(iptr,retaddr);
+	tm->used += JMP_REL32_NBYTES;
+	iptr += JMP_REL32_NBYTES;
 
 	while ((uintptr_t)iptr % 8) {
 		*iptr++ = X86OP_INT3;
@@ -441,20 +446,6 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 	}
 
 	return funcaddr;
-}
-
-static void gentrampjmp(void* from, void* to)
-{
-	int64_t ofst;
-
-	ofst = to - (from + JMP_REL32_NBYTES);
-	if (ofst > INT32_MAX || ofst < INT32_MIN) {
-		fprintf(pllog,"trampoline jump can't reach target\n");
-		abort();
-	}
-
-	*(uint8_t*)from = X86OP_JMP_REL32;
-	*(int32_t*)(from+1) = (int32_t)ofst;
 }
 
 struct scratchbuf {
@@ -720,24 +711,6 @@ static struct scratchbuf* find_scratchpath(void* startpt)
 
 	/* if we get here, couldn't find anything */
 	return NULL;
-}
-
-/* generate a jmp-rel8 at org to dst */
-static void genjmprel8(void* org, void* dst)
-{
-	int64_t ofst = dst - (org+JMP_REL8_NBYTES);
-	assert(ofst <= INT8_MAX && ofst >= INT8_MIN);
-	*(uint8_t*)org = X86OP_JMP_REL8;
-	*(uint8_t*)(org+1) = (int8_t)ofst;
-}
-
-/* generate a jmp-rel32 at org to dst */
-static void genjmprel32(void* org, void* dst)
-{
-	int64_t ofst = dst - (org+JMP_REL32_NBYTES);
-	assert(ofst <= INT32_MAX && ofst >= INT32_MIN);
-	*(uint8_t*)org = X86OP_JMP_REL32;
-	*(int32_t*)(org+1) = (int32_t)ofst;
 }
 
 static void patch_jmpchain(void* origin, struct scratchbuf* firstlink, void* dest)
