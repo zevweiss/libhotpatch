@@ -69,6 +69,7 @@ static int udinst_relocatable(ud_t* ud)
 	case UD_Icmp:
 	case UD_Ilea:
 	case UD_Imov:
+	case UD_Imovsxd:
 	case UD_Iand:
 	case UD_Idec:
 	case UD_Iadd:
@@ -189,7 +190,10 @@ static unsigned int ntrampmaps = 0;
 #define X86OP_JMP_REL8 0xeb
 #define X86OP_CALL_REL32 0xe8
 #define X86OP_JCC_REL32 0x0f80
+#define X86OP_JCC_REL8 0x70
 #define X86OP_NOP 0x90
+
+#define X86_MAX_INST_LEN 15
 
 #define JMP_REL32_NBYTES 5
 #define JMP_REL8_NBYTES 2
@@ -403,19 +407,47 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 }
 
 /*
- * Trampoline functions will start on 8-byte aligned addresses.
+ * Relocate 'numinsts' instructions to address 'to', using no more
+ * than 'maxlen' bytes.
+ */
+static size_t translate_insts(const struct inst* src, int numinsts,
+                              void* to, size_t maxlen)
+{
+	int i;
+	struct inst trans;
+	size_t len = 0;
+	uint8_t* iptr = to;
+
+	for (i = 0; i < numinsts; i++) {
+		trans.pc = iptr;
+		translate_inst(src+i,&trans);
+		if (len + trans.len > maxlen) {
+			fprintf(pllog,"code overflow from %p\n",to);
+			abort();
+		}
+		iptr = mempcpy(iptr,trans.bytes,trans.len);
+		len += trans.len;
+	}
+
+	return len;
+}
+
+#define TRAMPFUNC_ALIGN 8
+
+/*
+ * Generate a trampoline function, return its address
  */
 static void* gentramp(const struct inst* orig, const struct inst* succs,
-                     int nsuccs, struct trampmap* tm, void* retaddr)
+                      int nsuccs, struct trampmap* tm, void* retaddr)
 {
 	uint8_t* iptr;
 	void* funcaddr;
-	int i;
-	struct inst trans;
+	size_t added;
 
+	/* starting address of the trampoline */
 	funcaddr = iptr = tm->base + tm->used;
 
-	assert((uintptr_t)iptr % 8 == 0);
+	assert((uintptr_t)iptr % TRAMPFUNC_ALIGN == 0);
 
 	/* for starters we'll just do a no-op trampoline */
 	if (tm->used + orig->len > tm->size) {
@@ -425,22 +457,18 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 	iptr = mempcpy(iptr,orig->bytes,orig->len);
 	tm->used += orig->len;
 
-	for (i = 0; i < nsuccs; i++) {
-		trans.pc = iptr;
-		translate_inst(&succs[i],&trans);
-		if (tm->used + trans.len > tm->size) {
-			fprintf(pllog,"trampoline area overflow\n");
-			abort();
-		}
-		iptr = mempcpy(iptr,trans.bytes,trans.len);
-		tm->used += trans.len;
-	}
+	/* relocate instructions to the trampoline */
+	added = translate_insts(succs,nsuccs,iptr,tm->size - tm->used);
+	iptr += added;
+	tm->used += added;
 
+	/* and add the return jump */
 	genjmprel32(iptr,retaddr);
 	tm->used += JMP_REL32_NBYTES;
 	iptr += JMP_REL32_NBYTES;
 
-	while ((uintptr_t)iptr % 8) {
+	/* pad out to an aligned boundary */
+	while ((uintptr_t)iptr % TRAMPFUNC_ALIGN) {
 		*iptr++ = X86OP_INT3;
 		tm->used++;
 	}
@@ -872,16 +900,160 @@ static void* get_jmptarg(ud_t* ud)
 	return (void*)ud->pc + ofst;
 }
 
-static void invasive_jmppatch(void* origin, void* dest)
+#define CLOBBER_SHADOW_BUFLEN 16
+
+/*
+ * Figures out which instructions in a clobber-patch shadow will have
+ * to be duplicated (and potentially translated) in its trampoline.
+ */
+static void* find_clobber_succs(void* victim, int bytes_needed,
+                                struct inst* succs, int* nsuccs, int* succbytes)
 {
-	int nsuccs;
-	struct inst succs[JMP_REL32_NBYTES];
-	/* TODO: write this function */
-	fprintf(pllog,"warning: invasive_jmppatch NYI...\n");
-//	BREAK();
+	ud_t ud;
+	int shadow,i,bytes;
+
+	init_udinst(&ud,victim,X86_MAX_INST_LEN+CLOBBER_SHADOW_BUFLEN);
+
+	ud_disassemble(&ud);
+	assert(ud_insn_len(&ud) < bytes_needed);
+	shadow = bytes_needed - ud_insn_len(&ud);
+	for (i = 0, bytes = 0; i < shadow && bytes < shadow; i++) {
+		ud_disassemble(&ud);
+		dup_ud_inst(&ud,&succs[i]);
+		bytes += succs[i].len;
+	}
+	assert(bytes >= shadow);
+
+	*nsuccs = i;
+	*succbytes = bytes;
+	return (void*)ud.pc;
 }
 
-static void check_jump(ud_t* ud)
+static size_t retarget_branch(void* loc, void* targ)
+{
+	int64_t disp;
+	ud_t ud;
+	uint8_t cond;
+	uint16_t opcode;
+	int fits_rel8,is_rel32;
+	size_t len;
+
+	init_udinst(&ud,loc,X86_MAX_INST_LEN);
+	ud_disassemble(&ud);
+
+	fits_rel8 = within_rel8(loc,targ);
+	is_rel32 = ud.operand[0].size == 32;
+
+	switch (ud.mnemonic) {
+	case UD_Ijo:
+	case UD_Ijno:
+	case UD_Ijb:
+	case UD_Ijae:
+	case UD_Ijz:
+	case UD_Ijnz:
+	case UD_Ijbe:
+	case UD_Ija:
+	case UD_Ijs:
+	case UD_Ijns:
+	case UD_Ijp:
+	case UD_Ijnp:
+	case UD_Ijl:
+	case UD_Ijge:
+	case UD_Ijle:
+	case UD_Ijg:
+		/* jcc */
+		disp = targ - loc - (fits_rel8 ? JCC_REL8_NBYTES : JCC_REL32_NBYTES);
+		cond = ((uint8_t*)loc)[is_rel32 ? 1 : 0] & 0x0F;
+		if (fits_rel8) {
+			*((uint8_t*)loc) = (uint8_t)(X86OP_JCC_REL8 | cond);
+			assert(disp <= INT8_MAX && disp >= INT8_MIN);
+			*((int8_t*)loc + 1) = (int8_t)disp;
+			len = JCC_REL8_NBYTES;
+		} else {
+			opcode = (X86OP_JCC_REL32 | cond);
+			((uint8_t*)loc)[0] = opcode >> 8;
+			((uint8_t*)loc)[1] = opcode & 0xff;
+			assert(disp <= INT32_MAX && disp >= INT32_MIN);
+			*((int32_t*)((uint8_t*)loc + 2)) = (int32_t)disp;
+			len = JCC_REL32_NBYTES;
+		}
+		break;
+
+	case UD_Ijmp:
+		/* unconditional */
+		(fits_rel8 ? genjmprel8 : genjmprel32)(loc,targ);
+		len = fits_rel8 ? JMP_REL8_NBYTES : JMP_REL32_NBYTES;
+		break;
+
+	case UD_Ijcxz:
+	case UD_Ijecxz:
+	case UD_Ijrcxz:
+		fprintf(pllog,"stupid-ass x86 jcx NYI\n");
+		abort();
+
+	default:
+		fprintf(pllog,"unexpected instruction in retarget_branch: %s\n",ud_insn_asm(&ud));
+		abort();
+	}
+
+	return len;
+}
+
+static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
+{
+	int nsuccs,succbytes;
+	struct inst srcinst, succs[JCC_REL32_NBYTES];
+	void* retaddr;
+	void* tfaddr;
+	uint8_t* iptr;
+	ud_t srcud;
+	size_t added;
+
+	init_udinst(&srcud,origin,X86_MAX_INST_LEN);
+	ud_disassemble(&srcud);
+
+	dup_ud_inst(&srcud,&srcinst);
+
+	/* FIXME: ensure this patch doesn't overlap another */
+	retaddr = find_clobber_succs(origin,JMP_REL32_NBYTES,succs,
+	                             &nsuccs,&succbytes);
+
+	tfaddr = iptr = tm->base + tm->used;
+	assert((uintptr_t)iptr % TRAMPFUNC_ALIGN == 0);
+
+	/* jump to the trampoline area */
+	genjmprel32(origin,tfaddr);
+
+	/* move the original instruction to the trampoline */
+	if (tm->used + srcinst.len > tm->size) {
+		fprintf(pllog,"trampoline area overflow\n");
+		abort();
+	}
+	memcpy(iptr,srcinst.bytes,srcinst.len);
+
+	/* point the branch at its new target */
+	added = retarget_branch(iptr,dest);
+	iptr += added;
+	tm->used += added;
+
+	/* move any other instructions we need */
+	added = translate_insts(succs,nsuccs,iptr,tm->size - tm->used);
+	iptr += added;
+	tm->used += added;
+
+	/* add the return branch */
+	genjmprel32(iptr,retaddr);
+	iptr += JMP_REL32_NBYTES;
+	tm->used += JMP_REL32_NBYTES;
+
+	/* pad out to an aligned boundary */
+	while ((uintptr_t)iptr % TRAMPFUNC_ALIGN) {
+		*iptr++ = X86OP_INT3;
+		tm->used++;
+	}
+}
+
+static void check_jump(ud_t* ud, struct trampmap* tm)
 {
 	void* targ;
 	void* newtarg;
@@ -937,12 +1109,12 @@ static void check_jump(ud_t* ud)
 		if (scratchlink) {
 			patch_jmpchain(instaddr,scratchlink,newtarg);
 		} else {
-			invasive_jmppatch(instaddr,newtarg);
+			invasive_jmppatch(instaddr,newtarg,tm);
 		}
 	}
 }
 
-static void jmpchkpass(void* buf, size_t len)
+static void jmpchkpass(void* buf, size_t len, struct trampmap* tm)
 {
 	ud_t ud;
 
@@ -970,46 +1142,12 @@ static void jmpchkpass(void* buf, size_t len)
 		case UD_Ijcxz:
 		case UD_Ijecxz:
 		case UD_Ijrcxz:
-			check_jump(&ud);
+			check_jump(&ud,tm);
 			break;
 		default:
 			break;
 		}
 	}
-}
-
-#define CLOBBER_SHADOW_BUFLEN 16
-
-/*
- * Figures out which instructions after a syscall we can't
- * scratchbuf-patch will have to be duplicated (and potentially
- * translated) in its trampoline
- */
-static void* find_clobber_succs(const struct inst* victim, struct inst* succs,
-                                int* nsuccs, int* succbytes)
-{
-	ud_t ud;
-	int shadow,i,bytes;
-
-	ud_init(&ud);
-	ud_set_input_buffer(&ud,victim->bytes,victim->len+CLOBBER_SHADOW_BUFLEN);
-	ud_set_syntax(&ud,UD_SYN_ATT);
-	ud_set_mode(&ud,64);
-	ud_set_pc(&ud,(uintptr_t)victim->pc);
-
-	ud_disassemble(&ud);
-	assert(ud_insn_len(&ud) < JMP_REL32_NBYTES);
-	shadow = JMP_REL32_NBYTES - ud_insn_len(&ud);
-	for (i = 0, bytes = 0; i < shadow && bytes < shadow; i++) {
-		ud_disassemble(&ud);
-		dup_ud_inst(&ud,&succs[i]);
-		bytes += succs[i].len;
-	}
-	assert(bytes >= shadow);
-
-	*nsuccs = i;
-	*succbytes = bytes;
-	return (void*)ud.pc;
 }
 
 static void syspatchpass(struct trampmap* tm)
@@ -1032,7 +1170,8 @@ static void syspatchpass(struct trampmap* tm)
 			tfaddr = gentramp(&scinst,NULL,0,tm,syscalls[i]+2);
 			patch_jmpchain(syscalls[i],scratchlink,tfaddr);
 		} else {
-			retaddr = find_clobber_succs(&scinst,succs,&nsuccs,&succbytes);
+			retaddr = find_clobber_succs(syscalls[i],JMP_REL32_NBYTES,
+			                             succs,&nsuccs,&succbytes);
 			tfaddr = gentramp(&scinst,succs,nsuccs,tm,retaddr);
 			genjmprel32(syscalls[i],tfaddr);
 
@@ -1107,7 +1246,7 @@ static void patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
 {
 	scanpass(buf,len); /* populates 'syscalls' and 'nopbufs' arrays */
 	syspatchpass(tm); /* populates 'clobberpatches' array */
-	jmpchkpass(buf,len); /* checks for jumps with a destination in a clobberpatch */
+	jmpchkpass(buf,len,tm); /* checks for jumps with a destination in a clobberpatch */
 
 	if (syscalls) {
 		free(syscalls);
