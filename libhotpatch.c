@@ -483,16 +483,18 @@ static unsigned int allocnopbufs = 0;
 static void** syscalls = NULL;
 static unsigned int nsyscalls = 0;
 
-struct clobberpatch {
+struct membuf {
 	void* start;
-	uint8_t bytes;
+	size_t len;
 };
 
-static struct clobberpatch* clobberpatches = NULL;
-static unsigned int nclobberpatches = 0;
+struct clobberset {
+	struct membuf* patches;
+	unsigned int num;
+};
 
-/* static struct scratchbuf* int3bufs = NULL; */
-/* static unsigned int nint3bufs = 0; */
+struct clobberset existing_clobbers = { NULL, 0 };
+struct clobberset new_clobbers = { NULL, 0 };
 
 static void new_nopbuf(void* start, size_t len, uint8_t fallthrough)
 {
@@ -516,14 +518,29 @@ static void new_syscall(void* addr)
 	syscalls[nsyscalls-1] = addr;
 }
 
-static  void new_clobberpatch(void* start, uint8_t bytes)
+static void new_clobber(void* start, size_t len)
 {
-	clobberpatches = realloc(clobberpatches,sizeof(*clobberpatches)*++nclobberpatches);
-	assert(clobberpatches);
-	clobberpatches[nclobberpatches-1] = (struct clobberpatch) {
-		start = start,
-		bytes = bytes,
-	};
+	new_clobbers.patches = realloc(new_clobbers.patches,
+	                               sizeof(*new_clobbers.patches)*++new_clobbers.num);
+	assert(new_clobbers.patches);
+	new_clobbers.patches[new_clobbers.num-1].start = start;
+	new_clobbers.patches[new_clobbers.num-1].len = len;
+}
+
+static void transfer_clobbers(void)
+{
+	/* out with the old... */
+	if (existing_clobbers.num)
+		free(existing_clobbers.patches);
+
+	/* ...in with the new... */
+	existing_clobbers = new_clobbers;
+
+	/* ...and clear space for the next. */
+	if (new_clobbers.num) {
+		new_clobbers.num = 0;
+		new_clobbers.patches = NULL;
+	}
 }
 
 /*
@@ -819,13 +836,13 @@ static void patch_jmpchain(void* origin, struct scratchbuf* firstlink, void* des
 /* For use with bsearch */
 static int jmpcheck_clobberpatch_bscmp(const void* k, const void* vcp)
 {
-	const struct clobberpatch* cp = vcp;
+	const struct membuf* cp = vcp;
 
 	/* It's ok for jmp dest to be at the syscall */
 	if (k <= cp->start)
 		return -1;
 
-	if (k >= cp->start + cp->bytes)
+	if (k >= cp->start + cp->len)
 		return 1;
 
 	return 0;
@@ -1022,6 +1039,10 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 	int3len = succbytes + srcinst.len - JMP_REL32_NBYTES;
 	memset(origin+JMP_REL32_NBYTES,X86OP_INT3,int3len);
 
+	/* record that we've clobbered stuff (so we can check for
+	 * jumps into the clobbered area and patch them back up) */
+	new_clobber(origin,srcinst.len+succbytes);
+
 	/* move the original instruction to the trampoline */
 	if (tm->used + srcinst.len > tm->size) {
 		fprintf(pllog,"trampoline area overflow\n");
@@ -1055,13 +1076,15 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 	}
 }
 
-static void check_jump(ud_t* ud, struct trampmap* tm)
+/* Returns 1 if the jump was to a clobbered instruction and was
+ * patched, 0 otherwise. */
+static int check_jump(ud_t* ud, struct trampmap* tm)
 {
 	void* targ;
 	void* newtarg;
 	void* trampaddr;
 	void* instaddr;
-	struct clobberpatch* collision;
+	struct membuf* collision;
 	struct inst trampjmp_inst;
 	struct scratchbuf* scratchlink;
 	ud_t trampjmp;
@@ -1072,7 +1095,7 @@ static void check_jump(ud_t* ud, struct trampmap* tm)
 	case UD_OP_REG:
 	case UD_OP_MEM:
 		/* we'll assume these are safe. */
-		return;
+		return 0;
 
 	case UD_OP_JIMM:
 		targ = get_jmptarg(ud);
@@ -1084,10 +1107,10 @@ static void check_jump(ud_t* ud, struct trampmap* tm)
 
 	/* this is very inefficient (doing a fresh search for every
 	 * jump) */
-	collision = bsearch(targ,clobberpatches,nclobberpatches,sizeof(*clobberpatches),
-	                    jmpcheck_clobberpatch_bscmp);
+	collision = bsearch(targ,existing_clobbers.patches,existing_clobbers.num,
+	                    sizeof(*existing_clobbers.patches),jmpcheck_clobberpatch_bscmp);
 	if (!collision)
-		return;
+		return 0;
 
 	trampjmp_inst = (struct inst) {
 		.pc = collision->start,
@@ -1116,11 +1139,14 @@ static void check_jump(ud_t* ud, struct trampmap* tm)
 			invasive_jmppatch(instaddr,newtarg,tm);
 		}
 	}
+
+	return 1;
 }
 
-static void jmpchkpass(void* buf, size_t len, struct trampmap* tm)
+static unsigned int jmpchkpass(void* buf, size_t len, struct trampmap* tm)
 {
 	ud_t ud;
+	unsigned int npatches = 0;
 
 	init_udinst(&ud,buf,len);
 
@@ -1146,15 +1172,20 @@ static void jmpchkpass(void* buf, size_t len, struct trampmap* tm)
 		case UD_Ijcxz:
 		case UD_Ijecxz:
 		case UD_Ijrcxz:
-			check_jump(&ud,tm);
+			npatches += check_jump(&ud,tm);
 			break;
 		default:
 			break;
 		}
 	}
+
+	return npatches;
 }
 
-static void syspatchpass(struct trampmap* tm)
+/*
+ * Returns the total number of patches made by the pass.
+ */
+static unsigned int syspatchpass(struct trampmap* tm)
 {
 	int i;
 	struct scratchbuf* scratchlink;
@@ -1162,6 +1193,7 @@ static void syspatchpass(struct trampmap* tm)
 	int nsuccs,succbytes,int3len;
 	void* tfaddr;
 	void* retaddr;
+	unsigned int numpatched = 0;
 
 	for (i = 0; i < nsyscalls; i++) {
 		scinst = (struct inst) {
@@ -1174,13 +1206,14 @@ static void syspatchpass(struct trampmap* tm)
 			tfaddr = gentramp(&scinst,NULL,0,tm,
 			                  syscalls[i]+JMP_REL8_NBYTES);
 			patch_jmpchain(syscalls[i],scratchlink,tfaddr);
+			++numpatched;
 		} else {
 			retaddr = find_clobber_succs(syscalls[i],JMP_REL32_NBYTES,
 			                             succs,&nsuccs,&succbytes);
 			tfaddr = gentramp(&scinst,succs,nsuccs,tm,retaddr);
 			genjmprel32(syscalls[i],tfaddr);
 
-			new_clobberpatch(syscalls[i],succbytes+SYSCALL_NBYTES);
+			new_clobber(syscalls[i],succbytes+SYSCALL_NBYTES);
 
 			int3len = succbytes + SYSCALL_NBYTES - JMP_REL32_NBYTES;
 			memset(syscalls[i]+JMP_REL32_NBYTES,X86OP_INT3,int3len);
@@ -1189,12 +1222,16 @@ static void syspatchpass(struct trampmap* tm)
 			 * useful in the future, keep track of it. */
 			if (int3len > JMP_REL8_NBYTES)
 				new_nopbuf(syscalls[i]+JMP_REL32_NBYTES,int3len,0);
+			++numpatched;
 		}
 	}
 
 	/* we may have added scratchbufs onto the end of the nopbufs
 	 * array, so re-sort it */
 	qsort(nopbufs,nnopbufs,sizeof(*nopbufs),scratchbuf_cmp);
+
+	assert(numpatched == nsyscalls);
+	return numpatched;
 }
 
 /*
@@ -1256,9 +1293,21 @@ static void scanpass(void* buf, size_t len)
 
 static void patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
 {
-	scanpass(buf,len); /* populates 'syscalls' and 'nopbufs' arrays */
-	syspatchpass(tm); /* populates 'clobberpatches' array */
-	jmpchkpass(buf,len,tm); /* checks for jumps with a destination in a clobberpatch */
+	unsigned int npatches;
+	int fixpass;
+
+	scanpass(buf,len);
+
+	npatches = syspatchpass(tm);
+	transfer_clobbers();
+	fprintf(pllog,"%u/%u clobbered\n",existing_clobbers.num,npatches);
+
+	for (fixpass = 1; existing_clobbers.num; fixpass++) {
+		npatches = jmpchkpass(buf,len,tm);
+		transfer_clobbers();
+		fprintf(pllog,"    Fixup pass %i: %u/%u clobbered\n",fixpass,
+		        existing_clobbers.num,npatches);
+	}
 
 	if (syscalls) {
 		free(syscalls);
@@ -1266,11 +1315,14 @@ static void patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
 		nsyscalls = 0;
 	}
 
-	if (clobberpatches) {
-		free(clobberpatches);
-		clobberpatches = NULL;
-		nclobberpatches = 0;
+	if (existing_clobbers.patches) {
+		free(existing_clobbers.patches);
+		existing_clobbers.patches = NULL;
+		existing_clobbers.num = 0;
 	}
+
+	assert(!new_clobbers.num);
+	assert(!new_clobbers.patches);
 
 	if (nopbufs) {
 		free(nopbufs);
@@ -1618,6 +1670,7 @@ static void scan_and_patch(void)
 	}
 
 	for (cs = codesegs, i = 0; i < ncodesegs; cs++, i++) {
+		fprintf(pllog,"%s[%s]: ",cs->filename,cs->secname);
 		patch_sys_entries(cs->start,cs->len,
 		                  &trampmaps[maps[cs->mapnum].tmnum]);
 	}
