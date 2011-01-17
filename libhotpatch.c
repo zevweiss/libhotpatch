@@ -1047,6 +1047,10 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 	tm->used += added;
 
 	/* add the return branch */
+	if (tm->used + JMP_REL32_NBYTES > tm->size) {
+		fprintf(pllog,"trampoline area overflow\n");
+		abort();
+	}
 	genjmprel32(iptr,retaddr);
 	iptr += JMP_REL32_NBYTES;
 	tm->used += JMP_REL32_NBYTES;
