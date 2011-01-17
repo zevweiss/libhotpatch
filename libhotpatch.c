@@ -1293,47 +1293,6 @@ static void scanpass(void* buf, size_t len)
 	}
 }
 
-static void patch_sys_entries(void* buf, size_t len, struct trampmap* tm)
-{
-	unsigned int npatches;
-	int fixpass;
-
-	scanpass(buf,len);
-
-	npatches = syspatchpass(tm);
-	transfer_clobbers();
-	fprintf(pllog,"%u/%u clobbered\n",existing_clobbers.num,npatches);
-
-	for (fixpass = 1; existing_clobbers.num; fixpass++) {
-		npatches = jmpchkpass(buf,len,tm);
-		transfer_clobbers();
-		fprintf(pllog,"    Fixup pass %i: %u/%u clobbered\n",fixpass,
-		        existing_clobbers.num,npatches);
-	}
-
-	if (syscalls) {
-		free(syscalls);
-		syscalls = NULL;
-		nsyscalls = 0;
-	}
-
-	if (existing_clobbers.patches) {
-		free(existing_clobbers.patches);
-		existing_clobbers.patches = NULL;
-		existing_clobbers.num = 0;
-	}
-
-	assert(!new_clobbers.num);
-	assert(!new_clobbers.patches);
-
-	if (nopbufs) {
-		free(nopbufs);
-		nopbufs = NULL;
-		nnopbufs = 0;
-		allocnopbufs = 0;
-	}
-}
-
 struct map {
 	void* start;
 	void* end;
@@ -1358,6 +1317,54 @@ static unsigned int nmaps = 0;
 
 static struct codeseg* codesegs = NULL;
 static unsigned int ncodesegs = 0;
+
+static void patch_sys_entries(struct codeseg* cs)
+{
+	unsigned int npatches;
+	int fixpass;
+	void* buf = cs->start;
+	size_t len = cs->len;
+	struct trampmap* tm = &trampmaps[maps[cs->mapnum].tmnum];
+
+	scanpass(buf,len);
+
+	npatches = syspatchpass(tm);
+	transfer_clobbers();
+
+	if (npatches)
+		fprintf(pllog,"%s[%s]: %u/%u clobbered\n",cs->filename,
+		        cs->secname,existing_clobbers.num,npatches);
+
+	for (fixpass = 1; existing_clobbers.num; fixpass++) {
+		npatches = jmpchkpass(buf,len,tm);
+		transfer_clobbers();
+		if (npatches)
+			fprintf(pllog,"    Fixup pass %i: %u/%u clobbered\n",
+			        fixpass,existing_clobbers.num,npatches);
+	}
+
+	if (syscalls) {
+		free(syscalls);
+		syscalls = NULL;
+		nsyscalls = 0;
+	}
+
+	if (existing_clobbers.patches) {
+		free(existing_clobbers.patches);
+		existing_clobbers.patches = NULL;
+		existing_clobbers.num = 0;
+	}
+
+	assert(!new_clobbers.num);
+	assert(!new_clobbers.patches);
+
+	if (nopbufs) {
+		free(nopbufs);
+		nopbufs = NULL;
+		nnopbufs = 0;
+		allocnopbufs = 0;
+	}
+}
 
 static int perms_to_prot(char str[4])
 {
@@ -1671,11 +1678,8 @@ static void scan_and_patch(void)
 		}
 	}
 
-	for (cs = codesegs, i = 0; i < ncodesegs; cs++, i++) {
-		fprintf(pllog,"%s[%s]: ",cs->filename,cs->secname);
-		patch_sys_entries(cs->start,cs->len,
-		                  &trampmaps[maps[cs->mapnum].tmnum]);
-	}
+	for (cs = codesegs, i = 0; i < ncodesegs; cs++, i++)
+		patch_sys_entries(cs);
 }
 
 static void printargv(void)
