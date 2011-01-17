@@ -88,6 +88,8 @@ static int udinst_relocatable(ud_t* ud)
 	case UD_Icall:
 		if (ud->operand[0].type == UD_OP_JIMM)
 			return 0;
+		else if (ud->operand[0].type == UD_OP_REG)
+			return 1;
 		else
 			abort();
 
