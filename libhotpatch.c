@@ -142,13 +142,6 @@ static void inst_to_ud(const struct inst* inst, ud_t* ud)
 	ud_disassemble(ud);
 }
 
-static int inst_relocatable(const struct inst* inst)
-{
-	ud_t ud;
-	inst_to_ud(inst,&ud);
-	return udinst_relocatable(&ud);
-}
-
 static void dup_ud_inst(ud_t* ud, struct inst* inst)
 {
 	inst->len = ud_insn_len(ud);
