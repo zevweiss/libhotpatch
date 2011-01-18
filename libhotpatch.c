@@ -1702,7 +1702,6 @@ static void print_loghdr(void)
 
 static void libhotpatch_init(void)
 {
-	const char* hotpatch;
 	const char* logpath;
 
 	logpath = getenv("LIBHOTPATCH_LOGPATH");
@@ -1713,11 +1712,8 @@ static void libhotpatch_init(void)
 	assert(pllog);
 	print_loghdr();
 
-	hotpatch = getenv("LIBHOTPATCH_ENABLE");
-	if (hotpatch && strlen(hotpatch) > 0) {
-		read_maps();
-		scan_and_patch();
-	}
+	read_maps();
+	scan_and_patch();
 }
 
 static void libhotpatch_fini(void)
