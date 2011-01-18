@@ -29,10 +29,11 @@ For the cases where it can't quite pull this off, a "clobber-patch" is
 used: it simply writes a 5-byte instruction over a 2-byte one, and
 relocates the clobbered instructions into the trampoline, translating
 them as necessary if they are position-dependent.  This also
-introduces further complications if the clobbered any clobbered
-instruction is the target of a branch somewhere else in the code --
-that branch must then be retargeted to point to the relocated
-instruction.
+introduces further complications if any clobbered instruction is the
+target of a branch somewhere else in the code -- that branch must then
+be retargeted to point to the relocated instruction, which in turn can
+introduce another round of clobbering...so the patching process
+iterates until there are no "outstanding" clobbers.
 
 
 == Plans for future development
@@ -49,18 +50,17 @@ instruction.
   that page, and re-enable execution on it.  I think this may be
   slightly more complicated than it would appear at first glance.
 
+- Allow specification of specific DSOs to patch (or to ignore) via
+  environment variables.
+
 Hopefully I'll remember to update this as it progresses.
 
 
 == Support
 
-libhotpatch supports ("supports" may be too strong a word) only x86-64
-code on Linux.
-
-
-== Acknowledgments
-
-It uses Vivek Thampi's udis86 library for x86-64 disassembly.
+libhotpatch has been developed and tested exclusively on x86-64 Linux.
+Any functionality on other platforms is purely coincidental (and
+highly unlikely).
 
 
 == Build
@@ -75,6 +75,12 @@ First build libudis86: `cd` to the `udis86` directory, run
 Then build libudis86 with `make && make install`.
 
 Finally, just run `make` in the top-level directory.
+
+
+== Acknowledgments
+
+libhotpatch makes extensive use of Vivek Thampi's udis86 library for
+x86-64 disassembly.
 
 
 == Author
