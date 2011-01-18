@@ -11,7 +11,7 @@ DLIBS = dl elf
 LIBUDIS86 = udis86/install/lib/libudis86.a
 LDDLIBS = $(addprefix -l,$(DLIBS))
 
-LDFLAGS = -shared -Wl,-Bstatic $(LIBUDIS86) -Wl,-Bdynamic $(LDDLIBS)
+LDFLAGS = -shared $(LDDLIBS)
 
 default: libhotpatch.so
 
@@ -19,7 +19,7 @@ default: libhotpatch.so
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 libhotpatch.so: libhotpatch.o
-	$(CC) $(CFLAGS) -Wl,-soname,$@ -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wl,-soname,$@ -o $@ $^ $(LIBUDIS86) $(LDFLAGS)
 
 .PHONY: clean
 clean:
