@@ -1349,12 +1349,8 @@ static void patch_sys_entries(struct codeseg* cs)
 		nsyscalls = 0;
 	}
 
-	if (existing_clobbers.patches) {
-		free(existing_clobbers.patches);
-		existing_clobbers.patches = NULL;
-		existing_clobbers.num = 0;
-	}
-
+	assert(!existing_clobbers.num);
+	assert(!existing_clobbers.patches);
 	assert(!new_clobbers.num);
 	assert(!new_clobbers.patches);
 
