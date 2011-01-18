@@ -799,9 +799,9 @@ static void patch_jmpchain(void* origin, struct scratchbuf* firstlink, void* des
 			}
 
 			genjmprel32(link->start,dest);
+			assert(link->len >= JMP_REL32_NBYTES);
 			link->start += JMP_REL32_NBYTES;
 			link->len -= JMP_REL32_NBYTES;
-			assert(link->len >= 0);
 
 			/* make sure we don't leave any partial-nops lying around */
 			memset(link->start,X86OP_NOP,link->len);
