@@ -1,5 +1,5 @@
 CC = gcc
-CWARN = -Wall
+CWARN = -Wall -Wextra -Wno-sign-compare
 CDEBUG = -ggdb3
 COPT = -O0
 CFLAGS = $(CWARN) $(CDEBUG) $(COPT) -fPIC -fvisibility=hidden
