@@ -206,18 +206,20 @@ static inline void tm_check(struct trampmap* tm, size_t need)
 #define SYSCALL_NBYTES 2
 
 /* generate a jmp-rel8 at org to dst */
-static void genjmprel8(void* org, const void* dst)
+static void genjmprel8(void* vorg, const void* dst)
 {
-	int64_t ofst = dst - (org+JMP_REL8_NBYTES);
+	uint8_t* org = vorg;
+	int64_t ofst = (uint8_t*)dst - (org+JMP_REL8_NBYTES);
 	assert(ofst <= INT8_MAX && ofst >= INT8_MIN);
-	*(uint8_t*)org = X86OP_JMP_REL8;
+	*org = X86OP_JMP_REL8;
 	*(int8_t*)(org+1) = (int8_t)ofst;
 }
 
 /* generate a jmp-rel32 at org to dst */
-static void genjmprel32(void* org, const void* dst)
+static void genjmprel32(void* vorg, const void* dst)
 {
-	int64_t ofst = dst - (org+JMP_REL32_NBYTES);
+	uint8_t* org = vorg;
+	int64_t ofst = (uint8_t*)dst - (org+JMP_REL32_NBYTES);
 	assert(ofst <= INT32_MAX && ofst >= INT32_MIN);
 	*(uint8_t*)org = X86OP_JMP_REL32;
 	*(int32_t*)(org+1) = (int32_t)ofst;
