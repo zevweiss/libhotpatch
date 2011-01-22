@@ -1638,11 +1638,9 @@ static void scan_and_patch(void)
 	for (m = maps, i = 0; i < nmaps; m++, i++) {
 		if (m->prot & PROT_EXEC) {
 
-			/* don't scan/patch our own code */
+			/* don't bother scanning/patching our own code */
 			if ((basename = strrchr(m->path,'/'))
-			    && (!strcmp(basename+1,"libhotpatch.so")
-			        || !strncmp(basename+1,"libelf.so",
-			                    strlen("libelf.so"))))
+			    && !strcmp(basename+1,"libhotpatch.so"))
 				continue;
 
 			if (!strcmp(m->path,"[vdso]")
