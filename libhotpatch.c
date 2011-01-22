@@ -176,6 +176,15 @@ struct trampmap {
 static struct trampmap* trampmaps = NULL;
 static unsigned int ntrampmaps = 0;
 
+static inline void tm_check(struct trampmap* tm, size_t need)
+{
+	if (tm->used + need > tm->size) {
+		fprintf(hplog,"trampoline area overflow "
+		        "(requested %zi bytes at %p)\n",need,tm->base+tm->used);
+		abort();
+	}
+}
+
 /*
  * int3 used as a filler byte in trampoline areas so we'll trap in case
  * anything goes unexpectedly out of bounds.
@@ -446,10 +455,7 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 	assert((uintptr_t)iptr % TRAMPFUNC_ALIGN == 0);
 
 	/* for starters we'll just do a no-op trampoline */
-	if (tm->used + orig->len > tm->size) {
-		fprintf(hplog,"trampoline area overflow\n");
-		abort();
-	}
+	tm_check(tm,orig->len);
 	iptr = mempcpy(iptr,orig->bytes,orig->len);
 	tm->used += orig->len;
 
@@ -1046,10 +1052,7 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 	new_clobber(origin,srcinst.len+succbytes);
 
 	/* move the original instruction to the trampoline */
-	if (tm->used + srcinst.len > tm->size) {
-		fprintf(hplog,"trampoline area overflow\n");
-		abort();
-	}
+	tm_check(tm,srcinst.len);
 	memcpy(iptr,srcinst.bytes,srcinst.len);
 
 	/* point the branch at its new target */
@@ -1063,10 +1066,7 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 	tm->used += added;
 
 	/* add the return branch */
-	if (tm->used + JMP_REL32_NBYTES > tm->size) {
-		fprintf(hplog,"trampoline area overflow\n");
-		abort();
-	}
+	tm_check(tm,JMP_REL32_NBYTES);
 	genjmprel32(iptr,retaddr);
 	iptr += JMP_REL32_NBYTES;
 	tm->used += JMP_REL32_NBYTES;
