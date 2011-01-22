@@ -798,8 +798,8 @@ static void patch_jmpchain(void* origin, struct scratchbuf* firstlink, void* des
 				prevlink->len -= JMP_REL8_NBYTES;
 			}
 
-			genjmprel32(link->start,dest);
 			assert(link->len >= JMP_REL32_NBYTES);
+			genjmprel32(link->start,dest);
 			link->start += JMP_REL32_NBYTES;
 			link->len -= JMP_REL32_NBYTES;
 
