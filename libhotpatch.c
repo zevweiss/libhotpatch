@@ -30,7 +30,7 @@
 static void libhotpatch_init(void) __attribute__((constructor));
 static void libhotpatch_fini(void) __attribute__((destructor));
 
-static FILE* pllog = NULL;
+static FILE* hplog = NULL;
 
 #define BREAK() __asm__ __volatile__("int3")
 
@@ -112,7 +112,7 @@ static int udinst_relocatable(ud_t* ud)
 		return 0;
 
 	default:
-		fprintf(pllog,"NYI: relocatability of %s (%i bytes @ pc=%lx)\n",
+		fprintf(hplog,"NYI: relocatability of %s (%i bytes @ pc=%lx)\n",
 		        ud_insn_asm(ud),ud_insn_len(ud),ud->pc-ud_insn_len(ud));
 		abort();
 	}
@@ -257,7 +257,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 			origofst = oud.operand[0].lval.sbyte;
 			if ((orig->bytes[0] & 0xf0) == 0xe0) {
 				assert(orig->bytes[0] == 0xe3);
-				fprintf(pllog,"stupid-ass x86 jcx NYI\n");
+				fprintf(hplog,"stupid-ass x86 jcx NYI\n");
 				abort();
 			}
 			assert((orig->bytes[0] & 0xf0) == 0x70);
@@ -268,7 +268,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 			jccop = (orig->bytes[0] << 8) | orig->bytes[1];
 			break;
 		default:
-			fprintf(pllog,"unknown jcc operand size (%i)\n",
+			fprintf(hplog,"unknown jcc operand size (%i)\n",
 			        oud.operand[0].size);
 			abort();
 		}
@@ -276,7 +276,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 		targ = (uintptr_t)orig->pc + orig->len + origofst;
 		newofst = (int64_t)targ - ((int64_t)new->pc + JCC_REL32_NBYTES);
 		if (newofst > INT32_MAX || newofst < INT32_MIN) {
-			fprintf(pllog,"jcc-rel32 can't reach target\n");
+			fprintf(hplog,"jcc-rel32 can't reach target\n");
 			abort();
 		}
 
@@ -293,7 +293,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 	case UD_Ijmp:
 		jmp_is_call = oud.mnemonic == UD_Icall;
 		if (oud.operand[0].type != UD_OP_JIMM) {
-			fprintf(pllog,"translation NYI for %s\n",ud_insn_asm(&oud));
+			fprintf(hplog,"translation NYI for %s\n",ud_insn_asm(&oud));
 			abort();
 		}
 		switch (oud.operand[0].size) {
@@ -304,14 +304,14 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 			origofst = oud.operand[0].lval.sdword;
 			break;
 		default:
-			fprintf(pllog,"unknown jmp operand size (%i)\n",
+			fprintf(hplog,"unknown jmp operand size (%i)\n",
 			        oud.operand[0].size);
 			abort();
 		}
 		targ = (uintptr_t)orig->pc + orig->len + origofst;
 		newofst = (int64_t)targ - ((int64_t)new->pc + JMP_REL32_NBYTES);
 		if (newofst > INT32_MAX || newofst < INT32_MIN) {
-			fprintf(pllog,"jmp-rel32 can't reach target\n");
+			fprintf(hplog,"jmp-rel32 can't reach target\n");
 			abort();
 		}
 
@@ -336,7 +336,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 			targ = (uintptr_t)orig->pc + orig->len + oud.operand[1].lval.sdword;
 			newofst = (int64_t)targ - ((int64_t)new->pc + new->len);
 			if (newofst > INT32_MAX || newofst < INT32_MIN) {
-				fprintf(pllog,"rip-relative mov can't reach target\n");
+				fprintf(hplog,"rip-relative mov can't reach target\n");
 				abort();
 			}
 
@@ -355,7 +355,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 			targ = (uintptr_t)orig->pc + orig->len + oud.operand[0].lval.sdword;
 			newofst = (int64_t)targ - ((int64_t)new->pc + new->len);
 			if (newofst > INT32_MAX || newofst < INT32_MIN) {
-				fprintf(pllog,"rip-relative mov can't reach target\n");
+				fprintf(hplog,"rip-relative mov can't reach target\n");
 				abort();
 			}
 
@@ -367,7 +367,7 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 				assert(oud.operand[1].size == 64);
 				ofstbyte = 3;
 			} else {
-				fprintf(pllog,"unhandled mov type: %s\t%s\n",
+				fprintf(hplog,"unhandled mov type: %s\t%s\n",
 				        ud_insn_hex(&oud),ud_insn_asm(&oud));
 				abort();
 			}
@@ -390,14 +390,14 @@ static void translate_inst(const struct inst* orig, struct inst* new)
 		targ = (uintptr_t)orig->pc + orig->len + oud.operand[1].lval.sdword;
 		newofst = (int64_t)targ - ((int64_t)new->pc + new->len);
 		if (newofst > INT32_MAX || newofst < INT32_MIN) {
-			fprintf(pllog,"rip-relative lea can't reach target\n");
+			fprintf(hplog,"rip-relative lea can't reach target\n");
 			abort();
 		}
 		*(int32_t*)(&new->bytes[3]) = (int32_t)newofst;
 		return;
 
 	default:
-		fprintf(pllog,"new translation required: %s\n",ud_insn_asm(&oud));
+		fprintf(hplog,"new translation required: %s\n",ud_insn_asm(&oud));
 		abort();
 	}
 }
@@ -418,7 +418,7 @@ static size_t translate_insts(const struct inst* src, int numinsts,
 		trans.pc = iptr;
 		translate_inst(src+i,&trans);
 		if (len + trans.len > maxlen) {
-			fprintf(pllog,"code overflow from %p\n",to);
+			fprintf(hplog,"code overflow from %p\n",to);
 			abort();
 		}
 		iptr = mempcpy(iptr,trans.bytes,trans.len);
@@ -447,7 +447,7 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 
 	/* for starters we'll just do a no-op trampoline */
 	if (tm->used + orig->len > tm->size) {
-		fprintf(pllog,"trampoline area overflow\n");
+		fprintf(hplog,"trampoline area overflow\n");
 		abort();
 	}
 	iptr = mempcpy(iptr,orig->bytes,orig->len);
@@ -1001,11 +1001,11 @@ static size_t retarget_branch(void* loc, void* targ)
 	case UD_Ijcxz:
 	case UD_Ijecxz:
 	case UD_Ijrcxz:
-		fprintf(pllog,"stupid-ass x86 jcx NYI\n");
+		fprintf(hplog,"stupid-ass x86 jcx NYI\n");
 		abort();
 
 	default:
-		fprintf(pllog,"unexpected instruction in retarget_branch: %s\n",ud_insn_asm(&ud));
+		fprintf(hplog,"unexpected instruction in retarget_branch: %s\n",ud_insn_asm(&ud));
 		abort();
 	}
 
@@ -1047,7 +1047,7 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 
 	/* move the original instruction to the trampoline */
 	if (tm->used + srcinst.len > tm->size) {
-		fprintf(pllog,"trampoline area overflow\n");
+		fprintf(hplog,"trampoline area overflow\n");
 		abort();
 	}
 	memcpy(iptr,srcinst.bytes,srcinst.len);
@@ -1064,7 +1064,7 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 
 	/* add the return branch */
 	if (tm->used + JMP_REL32_NBYTES > tm->size) {
-		fprintf(pllog,"trampoline area overflow\n");
+		fprintf(hplog,"trampoline area overflow\n");
 		abort();
 	}
 	genjmprel32(iptr,retaddr);
@@ -1332,14 +1332,14 @@ static void patch_sys_entries(struct codeseg* cs)
 	transfer_clobbers();
 
 	if (npatches)
-		fprintf(pllog,"%s[%s]: %u/%u clobbered\n",cs->filename,
+		fprintf(hplog,"%s[%s]: %u/%u clobbered\n",cs->filename,
 		        cs->secname,existing_clobbers.num,npatches);
 
 	for (fixpass = 1; existing_clobbers.num; fixpass++) {
 		npatches = jmpchkpass(buf,len,tm);
 		transfer_clobbers();
 		if (npatches)
-			fprintf(pllog,"    Fixup pass %i: %u/%u clobbered\n",
+			fprintf(hplog,"    Fixup pass %i: %u/%u clobbered\n",
 			        fixpass,existing_clobbers.num,npatches);
 	}
 
@@ -1443,17 +1443,17 @@ static int new_trampmap(void* base, int origmap)
 	              PROT_READ|PROT_WRITE|PROT_EXEC,
 	              MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0);
 	if (tmbase == MAP_FAILED) {
-		fprintf(pllog,"trampoline area mmap failed for map %i (%s) at %p: %s\n",
+		fprintf(hplog,"trampoline area mmap failed for map %i (%s) at %p: %s\n",
 		        origmap,maps[origmap].path,base,strerror(errno));
 		base = (void*)((uintptr_t)base - (uintptr_t)(1ULL<<32));
 		tmbase = mmap(base,TRAMPMAP_MIN_SIZE,
 		              PROT_READ|PROT_WRITE|PROT_EXEC,
 		              MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0);
 		if (tmbase == MAP_FAILED) {
-			fprintf(pllog,"and failed again at %p\n",base);
+			fprintf(hplog,"and failed again at %p\n",base);
 			return -1;
 		} else
-			fprintf(pllog,"but worked on retry at %p\n",base);
+			fprintf(hplog,"but worked on retry at %p\n",base);
 	}
 	assert(tmbase == base);
 	trampmaps = realloc(trampmaps,
@@ -1503,7 +1503,7 @@ static int get_trampmap(unsigned int origmap)
 			return new_trampmap(lbound,origmap);
 	}
 
-	fprintf(pllog,"failed to find trampoline area for map %i (%s)\n",
+	fprintf(hplog,"failed to find trampoline area for map %i (%s)\n",
 	        origmap,maps[origmap].path);
 	abort();
 }
@@ -1512,11 +1512,11 @@ static void print_maps(void)
 {
 	int i,p;
 
-	fprintf(pllog,"initial maps:\n");
+	fprintf(hplog,"initial maps:\n");
 
 	for (i = 0; i < nmaps; i++) {
 		p = maps[i].prot;
-		fprintf(pllog,"%p-%p %c%c%c %s\n",maps[i].start,maps[i].end,
+		fprintf(hplog,"%p-%p %c%c%c %s\n",maps[i].start,maps[i].end,
 		        p & PROT_READ ? 'r' : '-', p & PROT_WRITE ? 'w' : '-',
 		        p & PROT_EXEC ? 'x' : '-', maps[i].path);
 	}
@@ -1528,19 +1528,19 @@ static int map_path(const char* path, void** base, size_t* len)
 	struct stat st;
 
 	if ((fd = open(path,O_RDONLY)) == -1) {
-		fprintf(pllog,"failed to open '%s': %s\n",path,strerror(errno));
+		fprintf(hplog,"failed to open '%s': %s\n",path,strerror(errno));
 		return -1;
 	}
 
 	if ((fstat(fd,&st)) == -1) {
-		fprintf(pllog,"failed to stat(2) '%s': %s\n",path,strerror(errno));
+		fprintf(hplog,"failed to stat(2) '%s': %s\n",path,strerror(errno));
 		close(fd);
 		return -1;
 	}
 
 	*base = mmap(NULL,st.st_size,PROT_READ,MAP_PRIVATE,fd,0);
 	if (*base == MAP_FAILED) {
-		fprintf(pllog,"failed to mmap '%s': %s\n",path,strerror(errno));
+		fprintf(hplog,"failed to mmap '%s': %s\n",path,strerror(errno));
 		*base = NULL;
 		close(fd);
 		return -1;
@@ -1570,29 +1570,29 @@ static void read_codesegs(int mapnum)
 	assert(elfversion != EV_NONE);
 
 	if (map_path(path,&base,&len)) {
-		fprintf(pllog,"failed to mmap '%s': %s\n",path,strerror(errno));
+		fprintf(hplog,"failed to mmap '%s': %s\n",path,strerror(errno));
 		abort();
 	}
 
 	if (!(elf = elf_memory(base,len))) {
-		fprintf(pllog,"libelf elf_memory() failed: %s\n",elf_errmsg(-1));
+		fprintf(hplog,"libelf elf_memory() failed: %s\n",elf_errmsg(-1));
 		abort();
 	}
 
 	if (elf_kind(elf) != ELF_K_ELF) {
-		fprintf(pllog,"%s not an ELF??\n",path);
+		fprintf(hplog,"%s not an ELF??\n",path);
 		abort();
 	}
 
 	if (elf_getshdrstrndx(elf,&shstrndx)) {
-		fprintf(pllog,"elf_getshstrndx() failed: %s\n",elf_errmsg(-1));
+		fprintf(hplog,"elf_getshstrndx() failed: %s\n",elf_errmsg(-1));
 		abort();
 	}
 
 	esec = NULL;
 	while ((esec = elf_nextscn(elf,esec))) {
 		if (gelf_getshdr(esec,&shdr) != &shdr) {
-			fprintf(pllog,"gelf_getshdr failed\n");
+			fprintf(hplog,"gelf_getshdr failed\n");
 			abort();
 		}
 
@@ -1602,13 +1602,13 @@ static void read_codesegs(int mapnum)
 			continue;
 
 		if (!(secname = elf_strptr(elf,shstrndx,shdr.sh_name))) {
-			fprintf(pllog,"elf_strptr() failed: %s\n",elf_errmsg(-1));
+			fprintf(hplog,"elf_strptr() failed: %s\n",elf_errmsg(-1));
 			abort();
 		}
 
 		if (shdr.sh_addr < (uintptr_t)maps[mapnum].start
 		    || (shdr.sh_addr + shdr.sh_size) > (uintptr_t)maps[mapnum].end) {
-			fprintf(pllog,"%s:.%s section not contained in map %i\n",
+			fprintf(hplog,"%s: %s section not contained in map %i\n",
 			        path,secname,mapnum);
 			abort();
 		}
@@ -1650,7 +1650,7 @@ static void scan_and_patch(void)
 				continue;
 
 			if (mprotect(m->start,m->end-m->start,m->prot|PROT_WRITE)) {
-				fprintf(pllog,"mprotect failed on map %i (%s): %s\n",
+				fprintf(hplog,"mprotect failed on map %i (%s): %s\n",
 				        i,m->path,strerror(errno));
 				abort();
 			}
@@ -1658,13 +1658,13 @@ static void scan_and_patch(void)
 			tmnum = get_trampmap(i);
 
 			if (tmnum == -1) {
-				fprintf(pllog,"mmap failed for %s trampoline area",
+				fprintf(hplog,"mmap failed for %s trampoline area",
 				        maps[i].path);
 				if (!strcmp(maps[i].path,"[vdso]")
 				    || !strcmp(maps[i].path,"[vsyscall]"))
-					fprintf(pllog,", ignoring...\n");
+					fprintf(hplog,", ignoring...\n");
 				else {
-					fprintf(pllog,", aborting!\n");
+					fprintf(hplog,", aborting!\n");
 					abort();
 				}
 			} else {
@@ -1686,12 +1686,12 @@ static void printargv(void)
 	argfile = fopen("/proc/self/cmdline","r");
 	assert(argfile);
 
-	fprintf(pllog,"%i: ",getpid());
+	fprintf(hplog,"%i: ",getpid());
 	while ((c =fgetc(argfile)) != EOF)
-		fputc(c ? c : ' ',pllog); /* args in /proc/pid/cmdline are NUL-delimited */
-	fputc('\n',pllog);
+		fputc(c ? c : ' ',hplog); /* args in /proc/pid/cmdline are NUL-delimited */
+	fputc('\n',hplog);
 
-	fflush(pllog);
+	fflush(hplog);
 	fclose(argfile);
 }
 
@@ -1708,8 +1708,8 @@ static void libhotpatch_init(void)
 	if (!logpath || !strlen(logpath))
 		logpath = "/proc/self/fd/2";
 
-	pllog = fopen(logpath,"w");
-	assert(pllog);
+	hplog = fopen(logpath,"w");
+	assert(hplog);
 	print_loghdr();
 
 	read_maps();
@@ -1718,5 +1718,5 @@ static void libhotpatch_init(void)
 
 static void libhotpatch_fini(void)
 {
-	fclose(pllog);
+	fclose(hplog);
 }
