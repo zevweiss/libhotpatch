@@ -34,8 +34,11 @@ static FILE* hplog = NULL;
 
 #define BREAK() __asm__ __volatile__("int3")
 
+static unsigned long trace_calls = 0;
+
 static void patch_trace(void)
 {
+	trace_calls += 1;
 }
 
 static void* memdup(void* orig, size_t len)
@@ -201,6 +204,7 @@ static inline void tm_check(struct trampmap* tm, size_t need)
 #define X86OP_JCC_REL32 0x0f80
 #define X86OP_JCC_REL8 0x70
 #define X86OP_NOP 0x90
+#define X86OP_RET 0xc3
 
 #define X86_MAX_INST_LEN 15
 
@@ -209,10 +213,10 @@ static inline void tm_check(struct trampmap* tm, size_t need)
 #define JCC_REL32_NBYTES 6
 #define JCC_REL8_NBYTES 2
 #define CALL_REL32_NBYTES 5
-#define CALL_IPREL_INDIRECT_BYTES 6
+#define CALL_IPREL_INDIRECT_NBYTES 6
 #define SYSCALL_NBYTES 2
 
-/* generate a jmp-rel8 at org to dst */
+/* generate a jmp-rel8 at vorg to dst */
 static void genjmprel8(void* vorg, const void* dst)
 {
 	uint8_t* org = vorg;
@@ -222,7 +226,7 @@ static void genjmprel8(void* vorg, const void* dst)
 	*(int8_t*)(org+1) = (int8_t)ofst;
 }
 
-/* generate a jmp-rel32 at org to dst */
+/* generate a jmp-rel32 at vorg to dst */
 static void genjmprel32(void* vorg, const void* dst)
 {
 	uint8_t* org = vorg;
@@ -232,16 +236,26 @@ static void genjmprel32(void* vorg, const void* dst)
 	*(int32_t*)(org+1) = (int32_t)ofst;
 }
 
-/* generate a IP-relative call-indirect at org to whatever's in
- * memory at org+ofst */
-static void gencallindirect(void* vorg, int32_t ofst)
+/* generate a call-rel32 at vorg to dst */
+static void gencallrel32(void* vorg, const void* dst)
 {
 	uint8_t* org = vorg;
-	intptr_t disp = ofst - CALL_IPREL_INDIRECT_BYTES;
-	assert(disp <= INT32_MAX && ofst >= INT32_MIN);
+	int64_t ofst = (uint8_t*)dst - (org+CALL_REL32_NBYTES);
+	assert(ofst <= INT32_MAX && ofst >= INT32_MIN);
+	*(uint8_t*)org = X86OP_CALL_REL32;
+	*(int32_t*)(org+1) = (int32_t)ofst;
+}
+
+/* generate a IP-relative call-indirect at vorg to whatever's in
+ * memory at targ [e.g. call *(targ-vorg)(%rip)] */
+static void gencallindirect(void* vorg, const void* targ)
+{
+	uint8_t* org = vorg;
+	intptr_t ofst = (uint8_t*)targ - (org + CALL_IPREL_INDIRECT_NBYTES);
+	assert(ofst <= INT32_MAX && ofst >= INT32_MIN);
 	*org = X86OP_CALL_IPREL_INDIRECT >> 8;
 	*(org+1) = X86OP_CALL_IPREL_INDIRECT & 0xff;
-	*(int32_t*)(org+2) = (int32_t)disp;
+	*(int32_t*)(org+2) = (int32_t)ofst;
 }
 
 /*
@@ -475,12 +489,13 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 
 	assert((uintptr_t)iptr % TRAMPFUNC_ALIGN == 0);
 
-	/* insert the call to the tracing function (the address of
-	 * which is stored in the first 8 bytes of each trampmap) */
-	tm_check(tm,CALL_IPREL_INDIRECT_BYTES);
-	gencallindirect(iptr,-tm->used);
-	tm->used += CALL_IPREL_INDIRECT_BYTES;
-	iptr += CALL_IPREL_INDIRECT_BYTES;
+	/* insert the call to the tracing function wrapper (which
+	 * saves & restores caller-saves regs and a copy of which is
+	 * located at the start of each trampmap) */
+	tm_check(tm,CALL_REL32_NBYTES);
+	gencallrel32(iptr,tm->base);
+	tm->used += CALL_REL32_NBYTES;
+	iptr += CALL_REL32_NBYTES;
 
 	/* copy original syscall instruction to trampoline */
 	tm_check(tm,orig->len);
@@ -1152,7 +1167,7 @@ static int check_jump(ud_t* ud, struct trampmap* tm)
 	trampaddr = get_jmptarg(&trampjmp);
 
 	/* This will need changing if trampoline code-gen changes */
-	newtarg = trampaddr + CALL_IPREL_INDIRECT_BYTES + (targ - collision->start);
+	newtarg = trampaddr + CALL_IPREL_INDIRECT_NBYTES + (targ - collision->start);
 
 	instaddr = (void*)ud->pc - ud_insn_len(ud);
 
@@ -1463,6 +1478,60 @@ static void read_maps(void)
 	qsort(maps,nmaps,sizeof(*maps),mapcmp);
 }
 
+static void insert_tm_prolog(struct trampmap* tm)
+{
+	static const uint8_t push_callersaves[] = {
+		0x50,       /* push %rax */
+		0x51,       /* push %rcx */
+		0x52,       /* push %rdx */
+		0x56,       /* push %rsi */
+		0x57,       /* push %rdi */
+		0x41, 0x50, /* push %r8 */
+		0x41, 0x51, /* push %r9 */
+		0x41, 0x52, /* push %r10 */
+		0x41, 0x53, /* push %r11 */
+	};
+
+	static const uint8_t pop_callersaves[] = {
+		0x41, 0x5b, /* pop %r11 */
+		0x41, 0x5a, /* pop %r10 */
+		0x41, 0x59, /* pop %r9 */
+		0x41, 0x58, /* pop %r8 */
+		0x5f,       /* pop %rdi */
+		0x5e,       /* pop %rsi */
+		0x5a,       /* pop %rdx */
+		0x59,       /* pop %rcx */
+		0x58,       /* pop %rax */
+	};
+
+	uint8_t* iptr = tm->base;
+	uint8_t* callpt;
+
+	iptr = mempcpy(iptr,push_callersaves,sizeof(push_callersaves));
+
+	/* leave space to insert the call to the tracing function */
+	callpt = iptr;
+	iptr += CALL_IPREL_INDIRECT_NBYTES;
+
+	iptr = mempcpy(iptr,pop_callersaves,sizeof(pop_callersaves));
+	*iptr++ = X86OP_RET;
+
+	/*
+	 * Due to the address map we're likely to end up with, a
+	 * call-rel32 won't be able to reach its target, so we'll put
+	 * the absolute address of the tracing function in nearby
+	 * memory and call it with an RIP-relative indirect call.
+         */
+	*(void**)iptr = patch_trace;
+	gencallindirect(callpt,iptr);
+	iptr += sizeof(void*);
+
+	while ((uintptr_t)iptr % TRAMPFUNC_ALIGN)
+		*iptr++ = X86OP_INT3;
+
+	tm->used = iptr - (uint8_t*)tm->base;
+}
+
 static int new_trampmap(void* base, int origmap)
 {
 	void* tmbase;
@@ -1489,20 +1558,12 @@ static int new_trampmap(void* base, int origmap)
 	                    sizeof(*trampmaps)*++ntrampmaps);
 	assert(trampmaps);
 
-	/*
-	 * For use by indirect calls to tracing function.  Due to the
-	 * address map we're likely to end up with, a call-rel32 won't
-	 * be able to reach its target, so we'll put the absolute
-	 * address in nearby memory and call it with an RIP-relative
-	 * indirect call.
-         */
-	*(uintptr_t*)tmbase = (uintptr_t)patch_trace;
-
 	trampmaps[ntrampmaps-1].base = tmbase;
 	trampmaps[ntrampmaps-1].size = TRAMPMAP_MIN_SIZE;
-	trampmaps[ntrampmaps-1].used = 8; /* sizeof(address) */
+	trampmaps[ntrampmaps-1].used = 0;
 	trampmaps[ntrampmaps-1].mapnum = origmap;
-	
+
+	insert_tm_prolog(&trampmaps[ntrampmaps-1]);
 
 	return ntrampmaps - 1;
 }
@@ -1756,5 +1817,6 @@ static void libhotpatch_init(void)
 
 static void libhotpatch_fini(void)
 {
+	fprintf(hplog,"patch-trace function called %lu times\n",trace_calls);
 	fclose(hplog);
 }
