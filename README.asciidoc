@@ -38,9 +38,9 @@ iterates until there are no "outstanding" clobbers.
 
 == Plans for future development
 
-- Inserting a call to a user-supplied tracing function in each
-  trampoline (this was in fact the original intent, I just haven't
-  quite gotten around to it yet).
+- Provide more useful information to tracing function (e.g. a pointer
+  to a modifiable struct describing machine state, which would be
+  restored before resumption of the patched code).
 
 - Allow a user-supplied predicate function to determine which
   instructions to patch.
@@ -50,7 +50,7 @@ iterates until there are no "outstanding" clobbers.
   that page, and re-enable execution on it.  I think this may be
   slightly more complicated than it would appear at first glance.
 
-- Allow specification of specific DSOs to patch (or to ignore) via
+- Allow selection of specific DSOs to patch (or to ignore) via
   environment variables.
 
 Hopefully I'll remember to update this as it progresses.
@@ -65,7 +65,10 @@ highly unlikely).
 
 == Build
 
-First build libudis86: `cd` to the `udis86` directory, run
+First acquire libudis86: run `git submodule update \--init` in the
+top-level directory of the libhotpatch git tree.
+
+Then build libudis86: `cd` to the `udis86` directory, run
 `./autogen.sh` and configure with:
 
 ----
