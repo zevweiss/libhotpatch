@@ -1609,20 +1609,6 @@ static int get_trampmap(unsigned int origmap)
 	abort();
 }
 
-static void print_maps(void)
-{
-	int i,p;
-
-	fprintf(hplog,"initial maps:\n");
-
-	for (i = 0; i < nmaps; i++) {
-		p = maps[i].prot;
-		fprintf(hplog,"%p-%p %c%c%c %s\n",maps[i].start,maps[i].end,
-		        p & PROT_READ ? 'r' : '-', p & PROT_WRITE ? 'w' : '-',
-		        p & PROT_EXEC ? 'x' : '-', maps[i].path);
-	}
-}
-
 static int map_path(const char* path, void** base, size_t* len)
 {
 	int fd;
