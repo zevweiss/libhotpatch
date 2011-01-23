@@ -475,7 +475,8 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 
 	assert((uintptr_t)iptr % TRAMPFUNC_ALIGN == 0);
 
-	/* insert the call to the tracing function */
+	/* insert the call to the tracing function (the address of
+	 * which is stored in the first 8 bytes of each trampmap) */
 	tm_check(tm,CALL_IPREL_INDIRECT_BYTES);
 	gencallindirect(iptr,-tm->used);
 	tm->used += CALL_IPREL_INDIRECT_BYTES;
@@ -492,6 +493,7 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 	tm->used += added;
 
 	/* and add the return jump */
+	tm_check(tm,JMP_REL32_NBYTES);
 	genjmprel32(iptr,retaddr);
 	tm->used += JMP_REL32_NBYTES;
 	iptr += JMP_REL32_NBYTES;
