@@ -1,22 +1,21 @@
 libhotpatch
 ===========
-Zev Weiss <zevweiss@gmail.com>
 
 libhotpatch implements hot-patching (as its name implies) of code at
 program load time.  It is a shared library intended for use via
-LD_PRELOAD (actually linking against it won't do you much good).
+`LD_PRELOAD` (actually linking against it won't do you much good).
 Currently it patches `syscall` instructions, replacing them with
 branches to dynamically-generated trampolines from which the
 instruction is actually executed, and which then branch back to the
 patch-point.
 
 
-== How it Works
+## How it Works
 
 Its mechanism for achieving this is a bit...unusual, I suppose.  It
 exploits (and depends on) gcc's tendency to create binaries with
 little pads of no-ops scattered throughout them (a result of gcc's
--falign-* flags).  Since a `syscall` instruction is only two bytes and
+`-falign-*` flags).  Since a `syscall` instruction is only two bytes and
 we need a 5-byte branch to reach the trampolines, it attempts to
 string together sequences of two-bytes jumps until it reaches a no-op
 pad large enough to accommodate a 5-byte `jmp`, threading a chain of
@@ -35,7 +34,7 @@ be retargeted to point to the relocated instruction, which in turn can
 introduce another round of clobbering...so the patching process
 iterates until there are no "outstanding" clobbers.
 
-== Usage Notes
+## Usage Notes
 
 To use libhotpatch, put the absolute path to libhotpatch.so in the
 environment variable `LD_PRELOAD` of the program to patch.  If you're
@@ -43,7 +42,7 @@ using bash, you can do this by simply prefixing your command with
 `LD_PRELOAD=/path/to/libhotpatch.so`, but if your shell doesn't
 support this syntax, `env` is an easy alternative.  You could of
 course just `export LD_PRELOAD=/path/to/libhotpatch.so`, but then it
-would be used on 'everything' that inherits that environment, which
+would be used on *everything* that inherits that environment, which
 might not be what you want.
 
 A few other environment variables also affect the behavior of
@@ -57,13 +56,13 @@ libhotpatch:
   patching DSOs.  These are matched against the absolute paths of the
   DSOs in the address space of the process via `fnmatch(3)`, so you
   can use shell glob patterns to specify e.g. `/usr/lib/*`.  Note
-  though that slashes 'are' matched by `*`, unlike a shell glob.  If
-  the first character of `LIBHOTPATCH_SKIP` is \'!\', matching of all
-  patterns is inverted and only DSOs 'not' matching any of the
+  though that slashes *are* matched by `*`, unlike a shell glob.  If
+  the first character of `LIBHOTPATCH_SKIP` is '!', matching of all
+  patterns is inverted and only DSOs *not* matching any of the
   patterns specified in the rest of the variable will be skipped.
   Patterns may be separated by spaces, tabs, newlines, or colons.
 
-== Plans for future development
+## Plans for future development
 
 - Provide more useful information to tracing function (e.g. a pointer
   to a modifiable struct describing machine state, which would be
@@ -80,14 +79,14 @@ libhotpatch:
 Hopefully I'll remember to update this as it progresses.
 
 
-== Support
+## Support
 
 libhotpatch has been developed and tested exclusively on x86-64 Linux.
 Any functionality on other platforms is purely coincidental (and
 highly unlikely).
 
 
-== Build
+## Build
 
 First acquire libudis86: run `git submodule update --init` in the
 top-level directory of the libhotpatch git tree.
@@ -95,26 +94,25 @@ top-level directory of the libhotpatch git tree.
 Then build libudis86: `cd` to the `udis86` directory, run
 `./autogen.sh` and configure with:
 
-----
-./configure --prefix=$PWD/install/ --disable-shared CFLAGS='-fPIC -fvisibility=hidden'
-----
+    ./configure --prefix=$PWD/install/ --disable-shared CFLAGS='-fPIC -fvisibility=hidden'
 
 Then build libudis86 with `make && make install`.
 
 Finally, just run `make` in the top-level directory.
 
 
-== Acknowledgments
+## Acknowledgments
 
 libhotpatch makes extensive use of Vivek Thampi's udis86 library for
 x86-64 disassembly.
 
 
-== Author
+## Author
 
-Zev Weiss
+Zev Weiss  
+<zevweiss@gmail.com>
 
 
-== License
+## License
 
 libhotpatch is released under the terms of the GPL, version 2.
