@@ -57,7 +57,7 @@ libhotpatch:
   DSOs in the address space of the process via `fnmatch(3)`, so you
   can use shell glob patterns to specify e.g. `/usr/lib/*`.  Note
   though that slashes *are* matched by `*`, unlike a shell glob.  If
-  the first character of `LIBHOTPATCH_SKIP` is '!', matching of all
+  the first character of `LIBHOTPATCH_SKIP` is `!`, matching of all
   patterns is inverted and only DSOs *not* matching any of the
   patterns specified in the rest of the variable will be skipped.
   Patterns may be separated by spaces, tabs, newlines, or colons.
@@ -91,12 +91,13 @@ highly unlikely).
 First acquire libudis86: run `git submodule update --init` in the
 top-level directory of the libhotpatch git tree.
 
-Then build libudis86: `cd` to the `udis86` directory, run
-`./autogen.sh` and configure with:
+Then build libudis86: `cd` to the `udis86` directory and run the
+following commands:
 
-    ./configure --prefix=$PWD/install/ --disable-shared CFLAGS='-fPIC -fvisibility=hidden'
-
-Then build libudis86 with `make && make install`.
+    $ ./autogen.sh
+    $ ./configure --prefix=$PWD/install/ --disable-shared CFLAGS='-fPIC -fvisibility=hidden'
+    $ make
+    $ make install
 
 Finally, just run `make` in the top-level directory.
 
