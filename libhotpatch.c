@@ -170,10 +170,6 @@ struct trampmap {
 	/* size of the trampoline map and how much of it we've
 	 * currently used */
 	size_t size,used;
-
-	/* which original (program text) map the trampolines in this
-	 * region bounce to/from */
-	unsigned int mapnum;
 };
 
 /* Initial size we'll aim at for trampoline maps */
@@ -1561,7 +1557,6 @@ static int new_trampmap(void* base, int origmap)
 	trampmaps[ntrampmaps-1].base = tmbase;
 	trampmaps[ntrampmaps-1].size = TRAMPMAP_MIN_SIZE;
 	trampmaps[ntrampmaps-1].used = 0;
-	trampmaps[ntrampmaps-1].mapnum = origmap;
 
 	insert_tm_prolog(&trampmaps[ntrampmaps-1]);
 
