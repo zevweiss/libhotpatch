@@ -21,6 +21,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <fnmatch.h>
 
 #include <libelf.h>
 #include <gelf.h>
@@ -1710,23 +1711,92 @@ static void read_codesegs(int mapnum)
 	munmap(base,len);
 }
 
-static void scan_and_patch(void)
+static struct {
+	char**  strs;
+	unsigned int num;
+	int neg;
+} skippats = { .strs = NULL, .num = 0, .neg = 0 };
+
+/* Characters that may be used as separators in the the
+ * LIBHOTPATCH_SKIP environment variable */
+#define LIBSEPS " \t\n:"
+
+static void get_skippats(void)
+{
+	const char* skiplibs;
+	size_t len;
+
+	skiplibs = getenv("LIBHOTPATCH_SKIP");
+
+	if (!skiplibs)
+		return;
+
+	if (skiplibs[0] == '!') {
+		skippats.neg = 1;
+		++skiplibs;
+	}
+
+	while (*skiplibs) {
+		skiplibs += strspn(skiplibs,LIBSEPS);
+		len = strcspn(skiplibs,LIBSEPS);
+
+		if (len > 0) {
+			++skippats.num;
+			skippats.strs = realloc(skippats.strs,
+			                        skippats.num*sizeof(char*));
+			assert(skippats.strs);
+			skippats.strs[skippats.num-1] = malloc(len+1);
+			assert(skippats.strs[skippats.num-1]);
+			memcpy(skippats.strs[skippats.num-1],skiplibs,len);
+			skippats.strs[skippats.num-1][len] = '\0';
+		}
+
+		skiplibs += len;
+	}
+}
+
+static int should_skip(const char* path)
 {
 	char* basename;
+	int i;
+
+	/* don't bother scanning/patching our own code */
+	if ((basename = strrchr(path,'/'))
+	    && !strcmp(basename+1,"libhotpatch.so"))
+		return 1;
+
+	/* can't quite handle these correctly... (yet) */
+	if (!strcmp(path,"[vdso]")
+	    || !strcmp(path,"[vsyscall]"))
+		return 1;
+
+	for (i = 0; i < skippats.num; i++) {
+		switch (fnmatch(skippats.strs[i],path,0)) {
+		case 0:
+			return !skippats.neg;
+		case FNM_NOMATCH:
+			continue;
+		default:
+			perror("fnmatch");
+			abort();
+		}
+	}
+
+	return skippats.neg;
+}
+
+static void scan_and_patch(void)
+{
 	int i,tmnum;
 	struct map* m;
 	struct codeseg* cs;
 
+	get_skippats();
+
 	for (m = maps, i = 0; i < nmaps; m++, i++) {
 		if (m->prot & PROT_EXEC) {
 
-			/* don't bother scanning/patching our own code */
-			if ((basename = strrchr(m->path,'/'))
-			    && !strcmp(basename+1,"libhotpatch.so"))
-				continue;
-
-			if (!strcmp(m->path,"[vdso]")
-			    || !strcmp(m->path,"[vsyscall]"))
+			if (should_skip(m->path))
 				continue;
 
 			if (mprotect(m->start,m->end-m->start,m->prot|PROT_WRITE)) {

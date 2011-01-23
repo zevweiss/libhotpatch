@@ -35,6 +35,33 @@ be retargeted to point to the relocated instruction, which in turn can
 introduce another round of clobbering...so the patching process
 iterates until there are no "outstanding" clobbers.
 
+== Usage Notes
+
+To use libhotpatch, put the absolute path to libhotpatch.so in the
+environment variable `LD_PRELOAD` of the program to patch.  If you're
+using bash, you can do this by simply prefixing your command with
+`LD_PRELOAD=/path/to/libhotpatch.so`, but if your shell doesn't
+support this syntax, `env` is an easy alternative.  You could of
+course just `export LD_PRELOAD=/path/to/libhotpatch.so`, but then it
+would be used on 'everything' that inherits that environment, which
+might not be what you want.
+
+A few other environment variables also affect the behavior of
+libhotpatch:
+
+- `LIBHOTPATCH_LOGPATH`: the path to a file to which libhotpatch will
+  print any output of its own.  This defaults to `/proc/self/fd/2`,
+  a.k.a. stderr; set it to `/dev/null` to shut it up.
+
+- `LIBHOTPATCH_SKIP`: a list of patterns to skip when scanning and
+  patching DSOs.  These are matched against the absolute paths of the
+  DSOs in the address space of the process via `fnmatch(3)`, so you
+  can use shell glob patterns to specify e.g. `/usr/lib/*`.  Note
+  though that slashes 'are' matched by `*`, unlike a shell glob.  If
+  the first character of `LIBHOTPATCH_SKIP` is \'!\', matching of all
+  patterns is inverted and only DSOs 'not' matching any of the
+  patterns specified in the rest of the variable will be skipped.
+  Patterns may be separated by spaces, tabs, newlines, or colons.
 
 == Plans for future development
 
@@ -49,9 +76,6 @@ iterates until there are no "outstanding" clobbers.
   no-execute; then catch the SIGSEGV when execution hits them, patch
   that page, and re-enable execution on it.  I think this may be
   slightly more complicated than it would appear at first glance.
-
-- Allow selection of specific DSOs to patch (or to ignore) via
-  environment variables.
 
 Hopefully I'll remember to update this as it progresses.
 
