@@ -472,6 +472,21 @@ static size_t translate_insts(const struct inst* src, int numinsts,
 #define TRAMPFUNC_ALIGN 8
 
 /*
+ * Pad the 'used' area of a trampmap out to an aligned boundary with
+ * int3 bytes, returning the number added.
+ */
+static unsigned int pad_tm(struct trampmap* tm)
+{
+	unsigned int count;
+	uint8_t* iptr = (uint8_t*)tm->base + tm->used;
+
+	for (count = 0; (uintptr_t)iptr % TRAMPFUNC_ALIGN; count++, tm->used++)
+		*iptr++ = X86OP_INT3;
+
+	return count;
+}
+
+/*
  * Generate a trampoline function, return its address
  */
 static void* gentramp(const struct inst* orig, const struct inst* succs,
@@ -511,10 +526,7 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 	iptr += JMP_REL32_NBYTES;
 
 	/* pad out to an aligned boundary */
-	while ((uintptr_t)iptr % TRAMPFUNC_ALIGN) {
-		*iptr++ = X86OP_INT3;
-		tm->used++;
-	}
+	pad_tm(tm);
 
 	return tfaddr;
 }
@@ -1113,10 +1125,7 @@ static void invasive_jmppatch(void* origin, void* dest, struct trampmap* tm)
 	tm->used += JMP_REL32_NBYTES;
 
 	/* pad out to an aligned boundary */
-	while ((uintptr_t)iptr % TRAMPFUNC_ALIGN) {
-		*iptr++ = X86OP_INT3;
-		tm->used++;
-	}
+	pad_tm(tm);
 }
 
 /* Returns 1 if the jump was to a clobbered instruction and was
@@ -1523,8 +1532,7 @@ static void insert_tm_prolog(struct trampmap* tm)
 	gencallindirect(callpt,iptr);
 	iptr += sizeof(void*);
 
-	while ((uintptr_t)iptr % TRAMPFUNC_ALIGN)
-		*iptr++ = X86OP_INT3;
+	iptr += pad_tm(tm);
 
 	tm->used = iptr - (uint8_t*)tm->base;
 }
