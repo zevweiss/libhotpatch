@@ -65,7 +65,7 @@ highly unlikely).
 
 == Build
 
-First acquire libudis86: run `git submodule update \--init` in the
+First acquire libudis86: run `git submodule update --init` in the
 top-level directory of the libhotpatch git tree.
 
 Then build libudis86: `cd` to the `udis86` directory, run
