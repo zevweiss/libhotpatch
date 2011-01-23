@@ -34,6 +34,10 @@ static FILE* hplog = NULL;
 
 #define BREAK() __asm__ __volatile__("int3")
 
+static void patch_trace(void)
+{
+}
+
 static void* memdup(void* orig, size_t len)
 {
 	void* new = malloc(len);
@@ -193,6 +197,7 @@ static inline void tm_check(struct trampmap* tm, size_t need)
 #define X86OP_JMP_REL32 0xe9
 #define X86OP_JMP_REL8 0xeb
 #define X86OP_CALL_REL32 0xe8
+#define X86OP_CALL_IPREL_INDIRECT 0xff15
 #define X86OP_JCC_REL32 0x0f80
 #define X86OP_JCC_REL8 0x70
 #define X86OP_NOP 0x90
@@ -203,6 +208,8 @@ static inline void tm_check(struct trampmap* tm, size_t need)
 #define JMP_REL8_NBYTES 2
 #define JCC_REL32_NBYTES 6
 #define JCC_REL8_NBYTES 2
+#define CALL_REL32_NBYTES 5
+#define CALL_IPREL_INDIRECT_BYTES 6
 #define SYSCALL_NBYTES 2
 
 /* generate a jmp-rel8 at org to dst */
@@ -223,6 +230,18 @@ static void genjmprel32(void* vorg, const void* dst)
 	assert(ofst <= INT32_MAX && ofst >= INT32_MIN);
 	*(uint8_t*)org = X86OP_JMP_REL32;
 	*(int32_t*)(org+1) = (int32_t)ofst;
+}
+
+/* generate a IP-relative call-indirect at org to whatever's in
+ * memory at org+ofst */
+static void gencallindirect(void* vorg, int32_t ofst)
+{
+	uint8_t* org = vorg;
+	intptr_t disp = ofst - CALL_IPREL_INDIRECT_BYTES;
+	assert(disp <= INT32_MAX && ofst >= INT32_MIN);
+	*org = X86OP_CALL_IPREL_INDIRECT >> 8;
+	*(org+1) = X86OP_CALL_IPREL_INDIRECT & 0xff;
+	*(int32_t*)(org+2) = (int32_t)disp;
 }
 
 /*
@@ -448,15 +467,21 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
                       int nsuccs, struct trampmap* tm, void* retaddr)
 {
 	uint8_t* iptr;
-	void* funcaddr;
+	void* tfaddr;
 	size_t added;
 
 	/* starting address of the trampoline */
-	funcaddr = iptr = tm->base + tm->used;
+	tfaddr = iptr = tm->base + tm->used;
 
 	assert((uintptr_t)iptr % TRAMPFUNC_ALIGN == 0);
 
-	/* for starters we'll just do a no-op trampoline */
+	/* insert the call to the tracing function */
+	tm_check(tm,CALL_IPREL_INDIRECT_BYTES);
+	gencallindirect(iptr,-tm->used);
+	tm->used += CALL_IPREL_INDIRECT_BYTES;
+	iptr += CALL_IPREL_INDIRECT_BYTES;
+
+	/* copy original syscall instruction to trampoline */
 	tm_check(tm,orig->len);
 	iptr = mempcpy(iptr,orig->bytes,orig->len);
 	tm->used += orig->len;
@@ -477,7 +502,7 @@ static void* gentramp(const struct inst* orig, const struct inst* succs,
 		tm->used++;
 	}
 
-	return funcaddr;
+	return tfaddr;
 }
 
 struct scratchbuf {
@@ -1124,8 +1149,8 @@ static int check_jump(ud_t* ud, struct trampmap* tm)
 	inst_to_ud(&trampjmp_inst,&trampjmp);
 	trampaddr = get_jmptarg(&trampjmp);
 
-	/* FIXME: this will need fixing when trampolines aren't no-ops */
-	newtarg = trampaddr + (targ - collision->start);
+	/* This will need changing if trampoline code-gen changes */
+	newtarg = trampaddr + CALL_IPREL_INDIRECT_BYTES + (targ - collision->start);
 
 	instaddr = (void*)ud->pc - ud_insn_len(ud);
 
@@ -1461,10 +1486,21 @@ static int new_trampmap(void* base, int origmap)
 	trampmaps = realloc(trampmaps,
 	                    sizeof(*trampmaps)*++ntrampmaps);
 	assert(trampmaps);
+
+	/*
+	 * For use by indirect calls to tracing function.  Due to the
+	 * address map we're likely to end up with, a call-rel32 won't
+	 * be able to reach its target, so we'll put the absolute
+	 * address in nearby memory and call it with an RIP-relative
+	 * indirect call.
+         */
+	*(uintptr_t*)tmbase = (uintptr_t)patch_trace;
+
 	trampmaps[ntrampmaps-1].base = tmbase;
 	trampmaps[ntrampmaps-1].size = TRAMPMAP_MIN_SIZE;
-	trampmaps[ntrampmaps-1].used = 0;
+	trampmaps[ntrampmaps-1].used = 8; /* sizeof(address) */
 	trampmaps[ntrampmaps-1].mapnum = origmap;
+	
 
 	return ntrampmaps - 1;
 }
