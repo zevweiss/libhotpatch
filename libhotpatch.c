@@ -1532,9 +1532,8 @@ static void insert_tm_prolog(struct trampmap* tm)
 	gencallindirect(callpt,iptr);
 	iptr += sizeof(void*);
 
-	iptr += pad_tm(tm);
-
 	tm->used = iptr - (uint8_t*)tm->base;
+	pad_tm(tm);
 }
 
 static int new_trampmap(void* base, int origmap)
