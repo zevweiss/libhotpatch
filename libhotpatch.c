@@ -26,7 +26,7 @@
 #include <libelf.h>
 #include <gelf.h>
 
-#include "udis86/install/include/udis86.h"
+#include "udis86.h"
 
 static void libhotpatch_init(void) __attribute__((constructor));
 static void libhotpatch_fini(void) __attribute__((destructor));
