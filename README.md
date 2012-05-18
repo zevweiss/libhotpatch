@@ -95,7 +95,7 @@ Then build libudis86: `cd` to the `udis86` directory and run the
 following commands:
 
     $ ./autogen.sh
-    $ ./configure --prefix=$PWD/install/ --disable-shared CFLAGS='-fPIC -fvisibility=hidden'
+    $ ./configure --prefix=$PWD/installroot/ --disable-shared CFLAGS='-fPIC -fvisibility=hidden'
     $ make
     $ make install
 

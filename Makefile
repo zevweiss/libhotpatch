@@ -1,7 +1,7 @@
 
 # TODO: build libudis86 automatically...preferably without redoing the
 # whole autogen/configure/make process every time.
-UDIS86DIR = udis86/install
+UDIS86DIR = udis86/installroot
 LIBUDIS86 = $(UDIS86DIR)/lib/libudis86.a
 UDIS86INC = $(UDIS86DIR)/include
 
