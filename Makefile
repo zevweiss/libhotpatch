@@ -10,7 +10,8 @@ CWARN = -Wall -Wextra -Wno-sign-compare
 CDEBUG = -ggdb3
 COPT = -O0
 CINCLUDE = -I$(UDIS86INC)
-CFLAGS = $(CWARN) $(CDEBUG) $(COPT) $(CINCLUDE) -fPIC -fvisibility=hidden
+CSTD = -std=gnu99
+CFLAGS = $(CSTD) $(CWARN) $(CDEBUG) $(COPT) $(CINCLUDE) -fPIC -fvisibility=hidden
 
 DLIBS = dl elf
 LDDLIBS = $(addprefix -l,$(DLIBS))

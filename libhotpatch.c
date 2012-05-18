@@ -29,7 +29,12 @@
 #include "udis86.h"
 
 #if defined(__APPLE__) || defined(__MACH__)
-#define mempcpy __builtin_mempcpy
+static inline void* mempcpy(void* restrict dst, const void* restrict src,
+                            size_t len)
+{
+	memcpy(dst, src, len);
+	return dst + len;
+}
 #endif
 
 static void libhotpatch_init(void) __attribute__((constructor));
