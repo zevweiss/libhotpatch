@@ -1867,7 +1867,7 @@ static void libhotpatch_init(void)
 
 	logpath = getenv("LIBHOTPATCH_LOGPATH");
 	if (!logpath || !strlen(logpath))
-		logpath = "/proc/self/fd/2";
+		logpath = "/dev/fd/2";
 
 	hplog = fopen(logpath,"w");
 	assert(hplog);
