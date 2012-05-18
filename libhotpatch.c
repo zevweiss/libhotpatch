@@ -28,6 +28,10 @@
 
 #include "udis86.h"
 
+#if defined(__APPLE__) || defined(__MACH__)
+#define mempcpy __builtin_mempcpy
+#endif
+
 static void libhotpatch_init(void) __attribute__((constructor));
 static void libhotpatch_fini(void) __attribute__((destructor));
 
