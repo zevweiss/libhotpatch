@@ -124,7 +124,7 @@ static int udinst_relocatable(ud_t* ud)
 		return 0;
 
 	default:
-		fprintf(hplog,"NYI: relocatability of %s (%i bytes @ pc=%lx)\n",
+		fprintf(hplog,"NYI: relocatability of %s (%i bytes @ pc=%llx)\n",
 		        ud_insn_asm(ud),ud_insn_len(ud),ud->pc-ud_insn_len(ud));
 		abort();
 	}
@@ -1456,7 +1456,7 @@ static void read_maps(void)
 	procmaps = fopen("/proc/self/maps","r");
 	assert(procmaps);
 	while (1) {
-		nscanned = fscanf(procmaps,"%p-%p %s %lx %hhx:%hhx %i%c",
+		nscanned = fscanf(procmaps,"%p-%p %s %llx %hhx:%hhx %i%c",
 		                  &start,&end,perms,&ofst,&majdev,&mindev,&inode,&space);
 		if (feof(procmaps))
 			break;
